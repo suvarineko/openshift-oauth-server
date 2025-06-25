@@ -1,0 +1,114 @@
+# Default values for oauth-server
+clusterDomain: "k8s.r4c-test.solution.sbt"
+
+replicaCount: 1
+
+image:
+  repository: "registry.apps.k8s.ose-prod.solution.sbt/openshift-release-dev/ocp-v4.0-art-dev"
+  pullPolicy: IfNotPresent
+  tag: "4.13.56-x86_64-oauth-server"
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  capabilities:
+    drop:
+      - MKNOD
+  runAsUser: 0
+  readOnlyRootFilesystem: false
+
+securityContext: {}
+
+service:
+  type: ClusterIP
+  port: 6443
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: cluster-ca
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+    nginx.ingress.kubernetes.io/ssl-passthrough: 'true'
+    nginx.ingress.kubernetes.io/ssl-redirect: 'true'
+  hosts:
+    - host: oauth-console.apps.k8s.r4c-test.solution.sbt
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls:
+    - hosts:
+        - oauth-console.apps.k8s.r4c-test.solution.sbt
+      secretName: oauth-console-tls
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 150Mi
+  requests:
+    cpu: 10m
+    memory: 50Mi
+
+nodeSelector: {}
+
+tolerations:
+  - operator: Exists
+  - key: node.kubernetes.io/not-ready
+    operator: Exists
+    effect: NoExecute
+  - key: node.kubernetes.io/unreachable
+    operator: Exists
+    effect: NoExecute
+  - key: node.kubernetes.io/disk-pressure
+    operator: Exists
+    effect: NoSchedule
+  - key: node.kubernetes.io/memory-pressure
+    operator: Exists
+    effect: NoSchedule
+  - key: node.kubernetes.io/pid-pressure
+    operator: Exists
+    effect: NoSchedule
+  - key: node.kubernetes.io/unschedulable
+    operator: Exists
+    effect: NoSchedule
+
+affinity:
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app: oauth-openshift
+              oauth-openshift-anti-affinity: 'true'
+          topologyKey: kubernetes.io/hostname
+
+# Monitoring settings
+monitoring:
+  # Enable ServiceMonitor for Prometheus
+  enabled: true
+  # Prometheus operator labels for ServiceMonitor
+  labels: {}
+
+# Custom routes for OAuth server (OpenShift specific)
+routes:
+  enabled: false
+  host: ""
+  tlsTermination: reencrypt
+  annotations: {}
+
+tls:
+  etcdIssuer: etcd-ca
+  clusterIssuer: cluster-ca

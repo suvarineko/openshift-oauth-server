@@ -1,0 +1,161 @@
+kind: Secret
+apiVersion: v1
+metadata:
+  name: ldap-secret
+  namespace: openshift-config
+data:
+  bindPassword: QzZzOTNMeThjaEdhbURz
+type: Opaque
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: ldap-config
+  namespace: openshift-config
+  labels:
+    oauth/identity: ldap-infra
+data:
+  ldap-group-sync.yaml: |
+    kind: "LDAPSyncConfig"
+    apiVersion: "v1"
+    url: ldap://sp-prod-dns-infra-01.solution.sbt:389 
+    insecure: true
+    bindDN: uid=ose-service,cn=users,cn=accounts,dc=solution,dc=sbt 
+    bindPassword:
+      file: "/etc/secrets/bindPassword"
+    rfc2307:
+      groupsQuery:
+        baseDN: "cn=groups,cn=accounts,dc=solution,dc=sbt"
+        scope: "sub"
+        derefAliases: "never"
+        filter: (objectclass=groupOfNames)
+        pageSize: 0
+      groupUIDAttribute: dn 
+      groupNameAttributes: [ cn ] 
+      groupMembershipAttributes: [ member ]
+      usersQuery:
+        baseDN: "cn=users,cn=accounts,dc=solution,dc=sbt"
+        scope: "sub"
+        derefAliases: "never"
+        pageSize: 0
+      userUIDAttribute: dn 
+      userNameAttributes: [ uid ]
+      tolerateMemberNotFoundErrors: true
+      tolerateMemberOutOfScopeErrors: true
+  whitelist.txt: |
+    cn=ose-kube-admin,cn=groups,cn=accounts,dc=solution,dc=sbt
+    cn=ose-devops-tuz,cn=groups,cn=accounts,dc=solution,dc=sbt
+    cn=ose-trb-test-tools,cn=groups,cn=accounts,dc=solution,dc=sbt
+    cn=ose-namespace-admins,cn=groups,cn=accounts,dc=solution,dc=sbt
+    cn=ose-trb-operations-and-monitoring,cn=groups,cn=accounts,dc=solution,dc=sbt
+    cn=ose-trb-synapse,cn=groups,cn=accounts,dc=solution,dc=sbt
+    cn=ose-trb-ui-framework,cn=groups,cn=accounts,dc=solution,dc=sbt
+    cn=ose-trb-migration-tools,cn=groups,cn=accounts,dc=solution,dc=sbt
+    cn=ose-trb-security,cn=groups,cn=accounts,dc=solution,dc=sbt
+    cn=ose-trb-process-as-code,cn=groups,cn=accounts,dc=solution,dc=sbt
+    cn=ose-trb-serverless,cn=groups,cn=accounts,dc=solution,dc=sbt
+    cn=ose-trb-business-applications,cn=groups,cn=accounts,dc=solution,dc=sbt
+    cn=ose-lt-trb-test-tools,cn=groups,cn=accounts,dc=solution,dc=sbt
+    cn=ose-first-line,cn=groups,cn=accounts,dc=solution,dc=sbt
+    cn=ose-2nd-line,cn=groups,cn=accounts,dc=solution,dc=sbt
+    cn=ose-arch-cap,cn=groups,cn=accounts,dc=solution,dc=sbt
+    cn=ose-release-team,cn=groups,cn=accounts,dc=solution,dc=sbt
+    cn=ose-cp-admins,cn=groups,cn=accounts,dc=solution,dc=sbt
+---
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: ldap-group-syncer
+  namespace: openshift-config
+  labels:
+    oauth/identity: ldap-infra
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: ldap-group-syncer
+rules:
+  - verbs:
+      - get
+      - list
+      - create
+      - update
+    apiGroups:
+      - ''
+      - user.openshift.io
+    resources:
+      - groups
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: 'system:ldap-group-syncers'
+subjects:
+  - kind: ServiceAccount
+    name: ldap-group-syncer
+    namespace: openshift-config
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ldap-group-syncer
+---
+kind: CronJob
+apiVersion: batch/v1
+metadata:
+  name: cronjob-ldap-group-sync
+  namespace: openshift-config
+  labels:
+    oauth/identity: ldap-infra
+spec:
+  schedule: '*/5 * * * *'
+  startingDeadlineSeconds: 60
+  concurrencyPolicy: Forbid
+  suspend: false
+  jobTemplate:
+    metadata:
+      creationTimestamp: null
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          creationTimestamp: null
+        spec:
+          restartPolicy: Never
+          activeDeadlineSeconds: 500
+          serviceAccountName: ldap-group-syncer
+          schedulerName: default-scheduler
+          terminationGracePeriodSeconds: 30
+          securityContext: {}
+          containers:
+            - name: cronjob-ldap-group-sync
+              image: registry.apps.k8s.ose-prod.solution.sbt/openshift4/ose-cli@sha256:7723c779775a97e0693eb3a5770d020f448c2012c844f911d581d1f1c95ffa4e
+              command:
+                - /bin/bash
+                - '-c'
+                - >-
+                  oc adm groups sync
+                  --sync-config=/etc/config/ldap-group-sync.yaml --confirm $([
+                  -s /etc/config/whitelist.txt ] && echo
+                  --whitelist=/etc/config/whitelist.txt)
+              resources: {}
+              volumeMounts:
+                - name: ldap-sync-volume
+                  mountPath: /etc/config
+                - name: ldap-secret
+                  mountPath: /etc/secrets
+              terminationMessagePath: /dev/termination-log
+              terminationMessagePolicy: File
+              imagePullPolicy: IfNotPresent
+          serviceAccount: ldap-group-syncer
+          volumes:
+            - name: ldap-sync-volume
+              configMap:
+                name: ldap-config
+                defaultMode: 420
+            - name: ldap-secret
+              secret:
+                secretName: ldap-secret
+                defaultMode: 420
+          dnsPolicy: ClusterFirst
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 5
