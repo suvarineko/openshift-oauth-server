@@ -65,6 +65,7 @@ import (
 	"github.com/openshift/oauth-server/pkg/osinserver"
 	"github.com/openshift/oauth-server/pkg/osinserver/registrystorage"
 	"github.com/openshift/oauth-server/pkg/server/csrf"
+	"github.com/openshift/oauth-server/pkg/server/discovery"
 	"github.com/openshift/oauth-server/pkg/server/errorpage"
 	"github.com/openshift/oauth-server/pkg/server/grant"
 	"github.com/openshift/oauth-server/pkg/server/login"
@@ -156,6 +157,11 @@ func (c *OAuthServerConfig) WithOAuth(handler http.Handler) (http.Handler, error
 		osinserver.NewDefaultErrorHandler(),
 	)
 	server.Install(mux, oauthdiscovery.OpenShiftOAuthAPIPrefix)
+
+	// Install OAuth 2.0 and OpenID Connect discovery endpoints
+	discoveryServer := discovery.NewDiscoveryServer(&c.ExtraOAuthConfig.Options)
+	discoveryEndpoints := discovery.NewDiscoveryEndpoints(discoveryServer)
+	discoveryEndpoints.Install(mux, "")
 
 	loginURL := c.ExtraOAuthConfig.Options.LoginURL
 	if len(loginURL) == 0 {
