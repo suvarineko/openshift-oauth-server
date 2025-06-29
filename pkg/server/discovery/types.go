@@ -1,5 +1,30 @@
 package discovery
 
+import "os"
+
+// DiscoveryConfig holds configuration options for OAuth/OIDC discovery endpoints
+type DiscoveryConfig struct {
+	// EnableJWKS controls whether to include jwks_uri in OIDC discovery metadata
+	// and whether to serve the JWKS endpoint
+	EnableJWKS bool
+}
+
+// NewDiscoveryConfigFromEnv creates discovery configuration from environment variables
+func NewDiscoveryConfigFromEnv() *DiscoveryConfig {
+	enableJWKS := os.Getenv("OAUTH_DISCOVERY_ENABLE_JWKS") == "true"
+	return &DiscoveryConfig{
+		EnableJWKS: enableJWKS,
+	}
+}
+
+// NewDefaultDiscoveryConfig creates discovery configuration with default values
+// JWKS is disabled by default since the current implementation is a placeholder
+func NewDefaultDiscoveryConfig() *DiscoveryConfig {
+	return &DiscoveryConfig{
+		EnableJWKS: false,
+	}
+}
+
 // OIDCProviderMetadata holds OpenID Connect Provider Configuration Information
 // as defined in OpenID Connect Discovery 1.0 specification
 // https://openid.net/specs/openid-connect-discovery-1_0.html#ProviderMetadata
@@ -16,8 +41,8 @@ type OIDCProviderMetadata struct {
 	// RECOMMENDED. URL of the OP's UserInfo Endpoint
 	UserinfoEndpoint string `json:"userinfo_endpoint,omitempty"`
 
-	// REQUIRED. URL of the OP's JSON Web Key Set document
-	JwksURI string `json:"jwks_uri"`
+	// RECOMMENDED. URL of the OP's JSON Web Key Set document
+	JwksURI string `json:"jwks_uri,omitempty"`
 
 	// RECOMMENDED. URL of the OP's Dynamic Client Registration Endpoint
 	RegistrationEndpoint string `json:"registration_endpoint,omitempty"`

@@ -69,6 +69,12 @@ func (d *DiscoveryServer) HandleJWKS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Return 404 if JWKS is not enabled
+	if !d.discoveryConfig.EnableJWKS {
+		http.Error(w, "JWKS endpoint is not enabled", http.StatusNotFound)
+		return
+	}
+
 	// For now, return an empty JWKS as OpenShift OAuth server doesn't use JWTs by default
 	// In a full implementation, this would return the actual public keys used for signing
 	jwks := map[string]interface{}{

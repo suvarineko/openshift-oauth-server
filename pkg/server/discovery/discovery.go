@@ -59,7 +59,6 @@ func (d *DiscoveryServer) BuildOIDCMetadata() *OIDCProviderMetadata {
 		AuthorizationEndpoint:            d.buildEndpointURL(issuer, oauthdiscovery.OpenShiftOAuthAPIPrefix, oauthdiscovery.AuthorizePath),
 		TokenEndpoint:                    d.buildEndpointURL(issuer, oauthdiscovery.OpenShiftOAuthAPIPrefix, oauthdiscovery.TokenPath),
 		UserinfoEndpoint:                 d.buildEndpointURL(issuer, oauthdiscovery.OpenShiftOAuthAPIPrefix, oauthdiscovery.InfoPath),
-		JwksURI:                          d.buildEndpointURL(issuer, "/.well-known", "/jwks.json"),
 		ScopesSupported:                  d.getSupportedScopes(),
 		ResponseTypesSupported:           DefaultOIDCResponseTypes(),
 		GrantTypesSupported:              DefaultGrantTypes(),
@@ -73,6 +72,11 @@ func (d *DiscoveryServer) BuildOIDCMetadata() *OIDCProviderMetadata {
 		RequestParameterSupported:     false,
 		RequestURIParameterSupported:  false,
 		RequireRequestURIRegistration: false,
+	}
+
+	// Only include jwks_uri if JWKS is enabled in configuration
+	if d.discoveryConfig.EnableJWKS {
+		metadata.JwksURI = d.buildEndpointURL(issuer, "/.well-known", "/jwks.json")
 	}
 
 	return metadata
