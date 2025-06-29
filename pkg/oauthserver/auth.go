@@ -159,7 +159,8 @@ func (c *OAuthServerConfig) WithOAuth(handler http.Handler) (http.Handler, error
 	server.Install(mux, oauthdiscovery.OpenShiftOAuthAPIPrefix)
 
 	// Install OAuth 2.0 and OpenID Connect discovery endpoints
-	discoveryServer := discovery.NewDiscoveryServer(&c.ExtraOAuthConfig.Options)
+	discoveryConfig := discovery.NewDiscoveryConfigFromEnv()
+	discoveryServer := discovery.NewDiscoveryServerWithConfig(&c.ExtraOAuthConfig.Options, discoveryConfig)
 	discoveryEndpoints := discovery.NewDiscoveryEndpoints(discoveryServer)
 	discoveryEndpoints.Install(mux, "")
 

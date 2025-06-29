@@ -11,13 +11,23 @@ import (
 
 // DiscoveryServer builds OAuth 2.0 and OpenID Connect discovery metadata
 type DiscoveryServer struct {
-	config *osinv1.OAuthConfig
+	config          *osinv1.OAuthConfig
+	discoveryConfig *DiscoveryConfig
 }
 
 // NewDiscoveryServer creates a new discovery server with the given OAuth configuration
 func NewDiscoveryServer(config *osinv1.OAuthConfig) *DiscoveryServer {
 	return &DiscoveryServer{
-		config: config,
+		config:          config,
+		discoveryConfig: NewDefaultDiscoveryConfig(),
+	}
+}
+
+// NewDiscoveryServerWithConfig creates a new discovery server with custom discovery configuration
+func NewDiscoveryServerWithConfig(config *osinv1.OAuthConfig, discoveryConfig *DiscoveryConfig) *DiscoveryServer {
+	return &DiscoveryServer{
+		config:          config,
+		discoveryConfig: discoveryConfig,
 	}
 }
 
