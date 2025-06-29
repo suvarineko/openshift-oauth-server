@@ -115,27 +115,31 @@ func TestHandleOAuthDiscovery(t *testing.T) {
 }
 
 func TestHandleOIDCDiscovery(t *testing.T) {
-	config := &osinv1.OAuthConfig{
-		MasterPublicURL: "https://oauth-console.apps.k8s.r4c-test.solution.sbt",
-	}
-
-	server := NewDiscoveryServer(config)
-
 	testCases := []struct {
 		name           string
 		method         string
+		enableJWKS     bool
 		expectedStatus int
 		expectedJSON   bool
 	}{
 		{
-			name:           "GET request",
+			name:           "GET request with JWKS disabled",
 			method:         "GET",
+			enableJWKS:     false,
+			expectedStatus: http.StatusOK,
+			expectedJSON:   true,
+		},
+		{
+			name:           "GET request with JWKS enabled",
+			method:         "GET",
+			enableJWKS:     true,
 			expectedStatus: http.StatusOK,
 			expectedJSON:   true,
 		},
 		{
 			name:           "POST request",
 			method:         "POST",
+			enableJWKS:     false,
 			expectedStatus: http.StatusMethodNotAllowed,
 			expectedJSON:   false,
 		},
@@ -143,6 +147,16 @@ func TestHandleOIDCDiscovery(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			config := &osinv1.OAuthConfig{
+				MasterPublicURL: "https://oauth-console.apps.k8s.r4c-test.solution.sbt",
+			}
+
+			discoveryConfig := &DiscoveryConfig{
+				EnableJWKS: tc.enableJWKS,
+			}
+
+			server := NewDiscoveryServerWithConfig(config, discoveryConfig)
+
 			req := httptest.NewRequest(tc.method, WellKnownOIDCPath, nil)
 			rec := httptest.NewRecorder()
 
@@ -182,10 +196,16 @@ func TestHandleOIDCDiscovery(t *testing.T) {
 					t.Error("IDTokenSigningAlgValuesSupported should not be empty")
 				}
 
-				// Validate JWKS URI
-				expectedJWKSURI := config.MasterPublicURL + "/.well-known/jwks.json"
-				if metadata.JwksURI != expectedJWKSURI {
-					t.Errorf("Expected JWKS URI %s, got %s", expectedJWKSURI, metadata.JwksURI)
+				// Validate JWKS URI based on configuration
+				if tc.enableJWKS {
+					expectedJWKSURI := config.MasterPublicURL + "/.well-known/jwks.json"
+					if metadata.JwksURI != expectedJWKSURI {
+						t.Errorf("Expected JWKS URI %s, got %s", expectedJWKSURI, metadata.JwksURI)
+					}
+				} else {
+					if metadata.JwksURI != "" {
+						t.Errorf("Expected JWKS URI to be empty when disabled, got %s", metadata.JwksURI)
+					}
 				}
 			}
 		})
@@ -193,27 +213,38 @@ func TestHandleOIDCDiscovery(t *testing.T) {
 }
 
 func TestHandleJWKS(t *testing.T) {
-	config := &osinv1.OAuthConfig{
-		MasterPublicURL: "https://oauth-console.apps.k8s.r4c-test.solution.sbt",
-	}
-
-	server := NewDiscoveryServer(config)
-
 	testCases := []struct {
 		name           string
 		method         string
+		enableJWKS     bool
 		expectedStatus int
 		expectedJSON   bool
 	}{
 		{
-			name:           "GET request",
+			name:           "GET request with JWKS enabled",
 			method:         "GET",
+			enableJWKS:     true,
 			expectedStatus: http.StatusOK,
 			expectedJSON:   true,
 		},
 		{
-			name:           "DELETE request",
+			name:           "GET request with JWKS disabled",
+			method:         "GET",
+			enableJWKS:     false,
+			expectedStatus: http.StatusNotFound,
+			expectedJSON:   false,
+		},
+		{
+			name:           "DELETE request with JWKS enabled",
 			method:         "DELETE",
+			enableJWKS:     true,
+			expectedStatus: http.StatusMethodNotAllowed,
+			expectedJSON:   false,
+		},
+		{
+			name:           "DELETE request with JWKS disabled",
+			method:         "DELETE",
+			enableJWKS:     false,
 			expectedStatus: http.StatusMethodNotAllowed,
 			expectedJSON:   false,
 		},
@@ -221,6 +252,16 @@ func TestHandleJWKS(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			config := &osinv1.OAuthConfig{
+				MasterPublicURL: "https://oauth-console.apps.k8s.r4c-test.solution.sbt",
+			}
+
+			discoveryConfig := &DiscoveryConfig{
+				EnableJWKS: tc.enableJWKS,
+			}
+
+			server := NewDiscoveryServerWithConfig(config, discoveryConfig)
+
 			req := httptest.NewRequest(tc.method, WellKnownJWKSPath, nil)
 			rec := httptest.NewRecorder()
 
@@ -253,46 +294,80 @@ func TestHandleJWKS(t *testing.T) {
 }
 
 func TestEndpointIntegration(t *testing.T) {
-	config := &osinv1.OAuthConfig{
-		MasterPublicURL: "https://oauth-console.apps.k8s.r4c-test.solution.sbt",
-	}
-
-	// Create a test server with all discovery endpoints
-	mux := http.NewServeMux()
-	discoveryServer := NewDiscoveryServer(config)
-	discoveryEndpoints := NewDiscoveryEndpoints(discoveryServer)
-	discoveryEndpoints.Install(mux, "")
-
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
 	testCases := []struct {
-		path           string
-		expectedStatus int
+		name       string
+		enableJWKS bool
+		tests      []struct {
+			path           string
+			expectedStatus int
+		}
 	}{
-		{WellKnownOAuthPath, http.StatusOK},
-		{WellKnownOIDCPath, http.StatusOK},
-		{WellKnownJWKSPath, http.StatusOK},
-		{"/nonexistent", http.StatusNotFound},
+		{
+			name:       "JWKS enabled",
+			enableJWKS: true,
+			tests: []struct {
+				path           string
+				expectedStatus int
+			}{
+				{WellKnownOAuthPath, http.StatusOK},
+				{WellKnownOIDCPath, http.StatusOK},
+				{WellKnownJWKSPath, http.StatusOK},
+				{"/nonexistent", http.StatusNotFound},
+			},
+		},
+		{
+			name:       "JWKS disabled",
+			enableJWKS: false,
+			tests: []struct {
+				path           string
+				expectedStatus int
+			}{
+				{WellKnownOAuthPath, http.StatusOK},
+				{WellKnownOIDCPath, http.StatusOK},
+				{WellKnownJWKSPath, http.StatusNotFound},
+				{"/nonexistent", http.StatusNotFound},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
-		t.Run(tc.path, func(t *testing.T) {
-			resp, err := http.Get(server.URL + tc.path)
-			if err != nil {
-				t.Fatalf("Failed to make request: %v", err)
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode != tc.expectedStatus {
-				t.Errorf("Expected status %d for path %s, got %d", tc.expectedStatus, tc.path, resp.StatusCode)
+		t.Run(tc.name, func(t *testing.T) {
+			config := &osinv1.OAuthConfig{
+				MasterPublicURL: "https://oauth-console.apps.k8s.r4c-test.solution.sbt",
 			}
 
-			if tc.expectedStatus == http.StatusOK {
-				contentType := resp.Header.Get("Content-Type")
-				if contentType != "application/json" {
-					t.Errorf("Expected Content-Type application/json for path %s, got %s", tc.path, contentType)
-				}
+			discoveryConfig := &DiscoveryConfig{
+				EnableJWKS: tc.enableJWKS,
+			}
+
+			// Create a test server with all discovery endpoints
+			mux := http.NewServeMux()
+			discoveryServer := NewDiscoveryServerWithConfig(config, discoveryConfig)
+			discoveryEndpoints := NewDiscoveryEndpoints(discoveryServer)
+			discoveryEndpoints.Install(mux, "")
+
+			server := httptest.NewServer(mux)
+			defer server.Close()
+
+			for _, test := range tc.tests {
+				t.Run(test.path, func(t *testing.T) {
+					resp, err := http.Get(server.URL + test.path)
+					if err != nil {
+						t.Fatalf("Failed to make request: %v", err)
+					}
+					defer resp.Body.Close()
+
+					if resp.StatusCode != test.expectedStatus {
+						t.Errorf("Expected status %d for path %s, got %d", test.expectedStatus, test.path, resp.StatusCode)
+					}
+
+					if test.expectedStatus == http.StatusOK {
+						contentType := resp.Header.Get("Content-Type")
+						if contentType != "application/json" {
+							t.Errorf("Expected Content-Type application/json for path %s, got %s", test.path, contentType)
+						}
+					}
+				})
 			}
 		})
 	}

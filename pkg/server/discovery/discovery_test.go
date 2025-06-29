@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"os"
 	"testing"
 	"k8s.io/apimachinery/pkg/runtime"
 
@@ -21,6 +22,42 @@ func TestNewDiscoveryServer(t *testing.T) {
 
 	if server.config != config {
 		t.Error("DiscoveryServer config not set correctly")
+	}
+
+	// Should have default discovery config with JWKS disabled
+	if server.discoveryConfig == nil {
+		t.Error("DiscoveryServer discoveryConfig not set")
+	}
+
+	if server.discoveryConfig.EnableJWKS {
+		t.Error("Expected JWKS to be disabled by default")
+	}
+}
+
+func TestNewDiscoveryServerWithConfig(t *testing.T) {
+	oauthConfig := &osinv1.OAuthConfig{
+		MasterPublicURL: "https://oauth-console.apps.k8s.r4c-test.solution.sbt",
+	}
+
+	discoveryConfig := &DiscoveryConfig{
+		EnableJWKS: true,
+	}
+
+	server := NewDiscoveryServerWithConfig(oauthConfig, discoveryConfig)
+	if server == nil {
+		t.Fatal("NewDiscoveryServerWithConfig returned nil")
+	}
+
+	if server.config != oauthConfig {
+		t.Error("DiscoveryServer oauth config not set correctly")
+	}
+
+	if server.discoveryConfig != discoveryConfig {
+		t.Error("DiscoveryServer discovery config not set correctly")
+	}
+
+	if !server.discoveryConfig.EnableJWKS {
+		t.Error("Expected JWKS to be enabled")
 	}
 }
 
@@ -82,45 +119,78 @@ func TestBuildOAuthMetadata(t *testing.T) {
 }
 
 func TestBuildOIDCMetadata(t *testing.T) {
-	config := &osinv1.OAuthConfig{
-		MasterPublicURL: "https://oauth-console.apps.k8s.r4c-test.solution.sbt",
+	testCases := []struct {
+		name        string
+		enableJWKS  bool
+		expectJWKS  bool
+	}{
+		{
+			name:        "JWKS disabled",
+			enableJWKS:  false,
+			expectJWKS:  false,
+		},
+		{
+			name:        "JWKS enabled",
+			enableJWKS:  true,
+			expectJWKS:  true,
+		},
 	}
 
-	server := NewDiscoveryServer(config)
-	metadata := server.BuildOIDCMetadata()
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			config := &osinv1.OAuthConfig{
+				MasterPublicURL: "https://oauth-console.apps.k8s.r4c-test.solution.sbt",
+			}
 
-	if metadata == nil {
-		t.Fatal("BuildOIDCMetadata returned nil")
-	}
+			discoveryConfig := &DiscoveryConfig{
+				EnableJWKS: tc.enableJWKS,
+			}
 
-	// Test required OIDC fields
-	if metadata.Issuer != "https://oauth-console.apps.k8s.r4c-test.solution.sbt" {
-		t.Errorf("Expected issuer to be %s, got %s", config.MasterPublicURL, metadata.Issuer)
-	}
+			server := NewDiscoveryServerWithConfig(config, discoveryConfig)
+			metadata := server.BuildOIDCMetadata()
 
-	if metadata.AuthorizationEndpoint != "https://oauth-console.apps.k8s.r4c-test.solution.sbt/oauth/authorize" {
-		t.Errorf("Expected authorization endpoint to be correct, got %s", metadata.AuthorizationEndpoint)
-	}
+			if metadata == nil {
+				t.Fatal("BuildOIDCMetadata returned nil")
+			}
 
-	if metadata.TokenEndpoint != "https://oauth-console.apps.k8s.r4c-test.solution.sbt/oauth/token" {
-		t.Errorf("Expected token endpoint to be correct, got %s", metadata.TokenEndpoint)
-	}
+			// Test required OIDC fields
+			if metadata.Issuer != "https://oauth-console.apps.k8s.r4c-test.solution.sbt" {
+				t.Errorf("Expected issuer to be %s, got %s", config.MasterPublicURL, metadata.Issuer)
+			}
 
-	if metadata.JwksURI != "https://oauth-console.apps.k8s.r4c-test.solution.sbt/.well-known/jwks.json" {
-		t.Errorf("Expected JWKS URI to be correct, got %s", metadata.JwksURI)
-	}
+			if metadata.AuthorizationEndpoint != "https://oauth-console.apps.k8s.r4c-test.solution.sbt/oauth/authorize" {
+				t.Errorf("Expected authorization endpoint to be correct, got %s", metadata.AuthorizationEndpoint)
+			}
 
-	// Test required arrays are not empty
-	if len(metadata.ResponseTypesSupported) == 0 {
-		t.Error("ResponseTypesSupported should not be empty")
-	}
+			if metadata.TokenEndpoint != "https://oauth-console.apps.k8s.r4c-test.solution.sbt/oauth/token" {
+				t.Errorf("Expected token endpoint to be correct, got %s", metadata.TokenEndpoint)
+			}
 
-	if len(metadata.SubjectTypesSupported) == 0 {
-		t.Error("SubjectTypesSupported should not be empty")
-	}
+			// Test JWKS URI based on configuration
+			if tc.expectJWKS {
+				expectedJWKSURI := "https://oauth-console.apps.k8s.r4c-test.solution.sbt/.well-known/jwks.json"
+				if metadata.JwksURI != expectedJWKSURI {
+					t.Errorf("Expected JWKS URI to be %s, got %s", expectedJWKSURI, metadata.JwksURI)
+				}
+			} else {
+				if metadata.JwksURI != "" {
+					t.Errorf("Expected JWKS URI to be empty when disabled, got %s", metadata.JwksURI)
+				}
+			}
 
-	if len(metadata.IDTokenSigningAlgValuesSupported) == 0 {
-		t.Error("IDTokenSigningAlgValuesSupported should not be empty")
+			// Test required arrays are not empty
+			if len(metadata.ResponseTypesSupported) == 0 {
+				t.Error("ResponseTypesSupported should not be empty")
+			}
+
+			if len(metadata.SubjectTypesSupported) == 0 {
+				t.Error("SubjectTypesSupported should not be empty")
+			}
+
+			if len(metadata.IDTokenSigningAlgValuesSupported) == 0 {
+				t.Error("IDTokenSigningAlgValuesSupported should not be empty")
+			}
+		})
 	}
 }
 
@@ -270,4 +340,62 @@ func TestDefaultValues(t *testing.T) {
 	if len(challengeMethods) != len(expectedChallengeMethods) {
 		t.Errorf("Expected %d default code challenge methods, got %d", len(expectedChallengeMethods), len(challengeMethods))
 	}
+}
+
+func TestDiscoveryConfig(t *testing.T) {
+	t.Run("NewDefaultDiscoveryConfig", func(t *testing.T) {
+		config := NewDefaultDiscoveryConfig()
+		if config == nil {
+			t.Fatal("NewDefaultDiscoveryConfig returned nil")
+		}
+		
+		// JWKS should be disabled by default
+		if config.EnableJWKS {
+			t.Error("Expected EnableJWKS to be false by default")
+		}
+	})
+
+	t.Run("NewDiscoveryConfigFromEnv enabled", func(t *testing.T) {
+		// Set environment variable
+		os.Setenv("OAUTH_DISCOVERY_ENABLE_JWKS", "true")
+		defer os.Unsetenv("OAUTH_DISCOVERY_ENABLE_JWKS")
+
+		config := NewDiscoveryConfigFromEnv()
+		if config == nil {
+			t.Fatal("NewDiscoveryConfigFromEnv returned nil")
+		}
+
+		if !config.EnableJWKS {
+			t.Error("Expected EnableJWKS to be true when env var is 'true'")
+		}
+	})
+
+	t.Run("NewDiscoveryConfigFromEnv disabled", func(t *testing.T) {
+		// Ensure environment variable is not set or is set to false
+		os.Setenv("OAUTH_DISCOVERY_ENABLE_JWKS", "false")
+		defer os.Unsetenv("OAUTH_DISCOVERY_ENABLE_JWKS")
+
+		config := NewDiscoveryConfigFromEnv()
+		if config == nil {
+			t.Fatal("NewDiscoveryConfigFromEnv returned nil")
+		}
+
+		if config.EnableJWKS {
+			t.Error("Expected EnableJWKS to be false when env var is not 'true'")
+		}
+	})
+
+	t.Run("NewDiscoveryConfigFromEnv unset", func(t *testing.T) {
+		// Ensure environment variable is not set
+		os.Unsetenv("OAUTH_DISCOVERY_ENABLE_JWKS")
+
+		config := NewDiscoveryConfigFromEnv()
+		if config == nil {
+			t.Fatal("NewDiscoveryConfigFromEnv returned nil")
+		}
+
+		if config.EnableJWKS {
+			t.Error("Expected EnableJWKS to be false when env var is unset")
+		}
+	})
 }
