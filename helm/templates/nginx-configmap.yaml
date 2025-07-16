@@ -7,191 +7,55 @@ metadata:
     {{- include "oauth-server.labels" . | nindent 4 }}
 data:
   nginx.conf: |
-    worker_processes auto;
-    error_log /var/log/nginx/error.log notice;
     pid /var/run/nginx.pid;
-    
+    error_log /dev/stderr notice;
     events {
         worker_connections 1024;
     }
-    
     http {
-        include /usr/local/openresty/nginx/conf/mime.types;
-        default_type application/octet-stream;
-        
-        # Temporary file paths for read-only filesystem - must be in http block
         client_body_temp_path /tmp/nginx_client_temp;
         proxy_temp_path /tmp/nginx_proxy_temp;
         fastcgi_temp_path /tmp/nginx_fastcgi_temp;
         uwsgi_temp_path /tmp/nginx_uwsgi_temp;
         scgi_temp_path /tmp/nginx_scgi_temp;
-        
-        # Custom log format for failover events
         log_format main '$remote_addr - $remote_user [$time_local] "$request" '
                         '$status $body_bytes_sent "$http_referer" '
                         '"$http_user_agent" "$http_x_forwarded_for" '
                         'upstream_addr="$upstream_addr" upstream_status="$upstream_status"';
-        
-        access_log /var/log/nginx/access.log main;
-        
-        sendfile on;
-        tcp_nopush on;
-        keepalive_timeout 65;
-        types_hash_max_size 4096;
-        
-        # Shared memory for health checks
-        lua_shared_dict healthcheck 1m;
-        
-        # Initialize upstream health checker using lua-resty-upstream-healthcheck
-        init_worker_by_lua_block {
-            local hc = require "resty.upstream.healthcheck"
-            
-            local ok, err = hc.spawn_checker{
-                shm = "healthcheck",
-                upstream = "oauth_backend",
-                type = "https",
-                http_req = "GET /healthz HTTP/1.1\r\nHost: {{ .Values.proxy.domain }}\r\nConnection: keep-alive\r\n\r\n",
-                port = nil,  -- use port from upstream
-                interval = {{ .Values.proxy.healthCheck.interval }} * 1000,  -- milliseconds
-                timeout = {{ .Values.proxy.healthCheck.timeout }} * 1000,   -- milliseconds
-                fall = {{ .Values.proxy.healthCheck.fall }},    -- consecutive failures
-                rise = {{ .Values.proxy.healthCheck.rise }},    -- consecutive successes
-                valid_statuses = {200},                         -- expected HTTP status codes
-                concurrency = 1,                                -- concurrent health checks
-            }
-            
-            if not ok then
-                ngx.log(ngx.ERR, "failed to spawn health checker: ", err)
-                return
-            end
-            
-            ngx.log(ngx.INFO, "OAuth upstream health checker initialized successfully")
-        }
-        
-        # OAuth backend with health checks
+        access_log /dev/stdout main;
         upstream oauth_backend {
-            server {{ .Values.proxy.upstreams.primary.host }}:{{ .Values.proxy.upstreams.primary.port }} max_fails=0 fail_timeout=0;
-            server {{ .Values.proxy.upstreams.secondary.host }}:{{ .Values.proxy.upstreams.secondary.port }} max_fails=0 fail_timeout=0 backup;
+            server {{ .Values.proxy.upstreams.primary.oauth }}:{{ .Values.proxy.upstreams.primary.port }};
         }
-        
+
+        upstream api_backend {
+            server {{ .Values.proxy.upstreams.primary.api }}:{{ .Values.proxy.upstreams.primary.port }};
+        }
+
         server {
             listen {{ .Values.proxy.port }} ssl;
             server_name {{ .Values.proxy.domain }};
-            
-            # SSL configuration using mounted TLS secret
             ssl_certificate /etc/tls/tls.crt;
             ssl_certificate_key /etc/tls/tls.key;
             ssl_protocols TLSv1.2 TLSv1.3;
             ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
             ssl_prefer_server_ciphers off;
-            
-            # Health check status endpoint  
-            location = /healthcheck/status {
-                access_log off;
-                allow 127.0.0.1;
-                allow 10.0.0.0/8;
-                allow 172.16.0.0/12;
-                allow 192.168.0.0/16;
-                deny all;
-                
-                content_by_lua_block {
-                    local hc = require "resty.upstream.healthcheck"
-                    ngx.say("OAuth Backend Health Status:")
-                    ngx.print(hc.status_page())
-                }
-            }
-            
-            # Main proxy location
+
             location / {
-                # Failover logging using lua-resty-upstream-healthcheck status
-                access_by_lua_block {
-                    local hc = require "resty.upstream.healthcheck"
-                    
-                    -- Get current upstream status
-                    local primary_peers = hc.get_primary_peers("oauth_backend")
-                    local backup_peers = hc.get_backup_peers("oauth_backend")
-                    
-                    -- Check if primary is down and backup is being used
-                    if primary_peers and #primary_peers == 0 and backup_peers and #backup_peers > 0 then
-                        ngx.log(ngx.WARN, "FAILOVER: Primary OAuth proxy down, routing to secondary")
-                    elseif not primary_peers or (#primary_peers == 0 and (not backup_peers or #backup_peers == 0)) then
-                        ngx.log(ngx.ERR, "CRITICAL: All OAuth proxies are down!")
-                    end
-                }
-                
-                # Proxy configuration
                 proxy_pass https://oauth_backend;
-                proxy_next_upstream error timeout http_502 http_503 http_504;
-                proxy_next_upstream_tries 2;
-                proxy_next_upstream_timeout 10s;
-                
-                # Header modifications
-                proxy_set_header Host {{ .Values.proxy.domain }};
-                proxy_set_header X-Real-IP $remote_addr;
-                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                proxy_set_header X-Forwarded-Proto $scheme;
-                proxy_set_header X-Forwarded-Host $host;
-                proxy_set_header X-Original-Host $http_host;
-                
-                # SSL verification
-                proxy_ssl_verify off;
-                proxy_ssl_session_reuse on;
-                
-                # Buffering settings
-                proxy_buffering on;
-                proxy_buffer_size 128k;
-                proxy_buffers 4 256k;
-                proxy_busy_buffers_size 256k;
-                
-                # Response body modification for OAuth redirects
-                header_filter_by_lua_block {
-                    local headers = ngx.header
-                    local proxy_domain = "{{ .Values.proxy.domain }}"
-                    
-                    -- Modify Location header for redirects
-                    if headers.location then
-                        local new_location = string.gsub(headers.location, 
-                            "https?://[^/]+", 
-                            "https://" .. proxy_domain)
-                        headers.location = new_location
-                        ngx.log(ngx.INFO, "Modified Location header: ", new_location)
-                    end
-                    
-                    -- Modify any custom OAuth headers if needed
-                    if headers["x-oauth-redirect"] then
-                        headers["x-oauth-redirect"] = string.gsub(headers["x-oauth-redirect"], 
-                            "https?://[^/]+", 
-                            "https://" .. proxy_domain)
-                    end
-                }
-                
-                # body_filter_by_lua_block {
-                #     local proxy_domain = "{{ .Values.proxy.domain }}"
-                #     local chunk = ngx.arg[1]
-                #     local eof = ngx.arg[2]
-                    
-                #     if chunk then
-                #         -- Replace OAuth URLs in response body (JSON responses, redirects, etc.)
-                #         chunk = string.gsub(chunk, 
-                #             '"https?://[^/"]+/oauth', 
-                #             '"https://' .. proxy_domain .. '/oauth')
-                #         chunk = string.gsub(chunk, 
-                #             "'https?://[^/']+/oauth", 
-                #             "'https://' .. proxy_domain .. "/oauth")
-                        
-                #         -- Replace any OAuth redirect URLs
-                #         chunk = string.gsub(chunk, 
-                #             'redirect_uri=https?://[^&"\']+', 
-                #             function(match)
-                #                 return string.gsub(match, "https?://[^/]+", "https://" .. proxy_domain)
-                #             end)
-                        
-                #         ngx.arg[1] = chunk
-                #     end
-                # }
+                proxy_ssl_server_name on;
+                proxy_set_header Host {{ .Values.proxy.upstreams.primary.oauth }}; 
+                # proxy_set_header Upgrade $http_upgrade;
+                # proxy_set_header Connection "upgrade";
             }
-            
-            # Nginx health endpoint (different from OAuth health check)
+
+            location /apis {
+                proxy_pass https://api_backend;
+                proxy_ssl_server_name on;
+                proxy_set_header Host {{ .Values.proxy.upstreams.primary.api }}; 
+                # proxy_set_header Upgrade $http_upgrade;
+                # proxy_set_header Connection "upgrade";
+            }
+
             location /nginx-health {
                 access_log off;
                 return 200 "healthy\n";
