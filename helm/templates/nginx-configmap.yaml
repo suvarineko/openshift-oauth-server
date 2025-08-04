@@ -24,11 +24,17 @@ data:
                         'upstream_addr="$upstream_addr" upstream_status="$upstream_status"';
         access_log /dev/stdout main;
         upstream oauth_backend {
-            server {{ .Values.proxy.upstreams.primary.oauth }}:{{ .Values.proxy.upstreams.primary.port }};
+            server {{ .Values.proxy.upstreams.primary.oauth }}:{{ .Values.proxy.upstreams.primary.port }} fail_timeout=15s max_fails=3;
+            server {{ .Values.proxy.upstreams.secondary.oauth }}:{{ .Values.proxy.upstreams.secondary.port }} backup;
         }
 
-        upstream api_backend {
-            server {{ .Values.proxy.upstreams.primary.api }}:{{ .Values.proxy.upstreams.primary.port }};
+        upstream oidc_api_backend {
+            server {{ .Values.proxy.upstreams.primary.oidc }}:{{ .Values.proxy.upstreams.primary.port }};
+        }
+
+        upstream oauth_api_backend {
+            server {{ .Values.proxy.upstreams.primary.api }}:{{ .Values.proxy.upstreams.primary.port }} fail_timeout=15s max_fails=3;
+            server {{ .Values.proxy.upstreams.secondary.api }}:{{ .Values.proxy.upstreams.secondary.port }} backup;
         }
 
         server {
@@ -39,6 +45,11 @@ data:
             ssl_protocols TLSv1.2 TLSv1.3;
             ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
             ssl_prefer_server_ciphers off;
+            
+            # Declare variables for Lua script
+            set $chosen_upstream "";
+            set $target_path "";
+            set $host_header "";
 
             location / {
                 proxy_pass https://oauth_backend;
@@ -49,9 +60,66 @@ data:
             }
 
             location /apis {
-                proxy_pass https://api_backend;
+                access_by_lua_block {
+                    local cjson = require "cjson"
+                    local upstream = "oauth_api_backend"
+                    local target_path = ngx.var.uri
+                    local host_header = "{{ .Values.proxy.upstreams.primary.api }}"
+                    
+                    -- Read request body
+                    ngx.req.read_body()
+                    local body = ngx.req.get_body_data()
+                    
+                    if body then
+                        local success, json_data = pcall(cjson.decode, body)
+                        if success and json_data then
+                            -- Check if it's a TokenReview request
+                            if json_data.kind == "TokenReview" and 
+                               json_data.spec and 
+                               json_data.spec.token then
+                                
+                                local token = json_data.spec.token
+                                if string.sub(token, 1, 7) == "sha256~" then
+                                    upstream = "oauth_api_backend"
+                                    target_path = ngx.var.uri
+                                    host_header = "{{ .Values.proxy.upstreams.primary.api }}"
+                                    ngx.log(ngx.INFO, "TokenReview with oauth token - routing to oauth_api_backend" .. ngx.var.uri)
+                                else
+                                    upstream = "oidc_api_backend"
+                                    target_path = "/validate-token"
+                                    host_header = "{{ .Values.proxy.upstreams.primary.oidc }}"
+                                    ngx.log(ngx.INFO, "TokenReview with oidc token - routing to oidc_api_backend/validate-token")
+                                end
+                            else
+                                -- Not a TokenReview or missing token - use oauth_api_backend
+                                upstream = "oauth_api_backend"
+                                target_path = ngx.var.uri
+                                host_header = "{{ .Values.proxy.upstreams.primary.api }}"
+                                ngx.log(ngx.INFO, "Not a TokenReview request - routing to oauth_api_backend" .. ngx.var.uri)
+                            end
+                        else
+                            -- Invalid JSON - use oauth_api_backend
+                            upstream = "oauth_api_backend"
+                            target_path = ngx.var.uri
+                            host_header = "{{ .Values.proxy.upstreams.primary.api }}"
+                            ngx.log(ngx.INFO, "Not a JSON in request body - routing to oauth_api_backend" .. ngx.var.uri)
+                        end
+                    else
+                        -- No body - use oauth_api_backend
+                        upstream = "oauth_api_backend"
+                        target_path = ngx.var.uri
+                        host_header = "{{ .Values.proxy.upstreams.primary.api }}"
+                        ngx.log(ngx.INFO, "No request body - routing to oauth_api_backend" .. ngx.var.uri)
+                    end
+                    
+                    ngx.var.chosen_upstream = upstream
+                    ngx.var.target_path = target_path
+                    ngx.var.host_header = host_header
+                }
+                
+                proxy_pass https://$chosen_upstream$target_path;
                 proxy_ssl_server_name on;
-                proxy_set_header Host {{ .Values.proxy.upstreams.primary.api }}; 
+                proxy_set_header Host $host_header;
                 # proxy_set_header Upgrade $http_upgrade;
                 # proxy_set_header Connection "upgrade";
             }
