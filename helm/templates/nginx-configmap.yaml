@@ -52,11 +52,45 @@ data:
             set $host_header "";
 
             location / {
+                access_log /dev/stdout main;
+                error_log /dev/stderr debug;
+                
+                # # Log the original request details
+                # access_by_lua_block {
+                #     ngx.log(ngx.INFO, "OAuth request: " .. ngx.var.request_method .. " " .. ngx.var.request_uri)
+                #     ngx.log(ngx.INFO, "Original Host: " .. (ngx.var.http_host or "none"))
+                #     ngx.log(ngx.INFO, "Proxy Host will be: {{ .Values.proxy.upstreams.primary.oauth }}")
+                #     ngx.log(ngx.INFO, "User-Agent: " .. (ngx.var.http_user_agent or "none"))
+                #     if ngx.var.args then
+                #         ngx.log(ngx.INFO, "Query params: " .. ngx.var.args)
+                #     end
+                    
+                #     -- Log all headers for debugging
+                #     local h = ngx.req.get_headers()
+                #     for k, v in pairs(h) do
+                #         if k:lower() == "authorization" or k:lower() == "cookie" then
+                #             ngx.log(ngx.INFO, "Header " .. k .. ": [REDACTED]")
+                #         else
+                #             ngx.log(ngx.INFO, "Header " .. k .. ": " .. tostring(v))
+                #         end
+                #     end
+                # }
+                
                 proxy_pass https://oauth_backend;
                 proxy_ssl_server_name on;
-                proxy_set_header Host {{ .Values.proxy.upstreams.primary.oauth }}; 
+                proxy_set_header Host {{ .Values.proxy.upstreams.primary.oauth }};
+                
+                # # Additional headers for better upstream compatibility
+                # proxy_set_header X-Real-IP $remote_addr;
+                # proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                # proxy_set_header X-Forwarded-Proto $scheme;
+                # proxy_set_header X-Forwarded-Host $host;
                 # proxy_set_header Upgrade $http_upgrade;
                 # proxy_set_header Connection "upgrade";
+                
+                # # Enhanced error handling - include 400 Bad Request
+                # proxy_intercept_errors on;
+                # error_page 400 404 500 502 503 504;
             }
 
             location /apis {
