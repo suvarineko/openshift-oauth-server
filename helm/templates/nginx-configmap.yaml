@@ -13,6 +13,7 @@ data:
         worker_connections 1024;
     }
     http {
+        resolver 169.254.20.10;
         client_body_temp_path /tmp/nginx_client_temp;
         proxy_temp_path /tmp/nginx_proxy_temp;
         fastcgi_temp_path /tmp/nginx_fastcgi_temp;
@@ -61,60 +62,69 @@ data:
                     local http = require "resty.http"
                     local httpc = http.new()
 
-                    local primary_host = "{{ .Values.proxy.upstreams.primary.oauth }}"
+                    local primary_oauth_host = "{{ .Values.proxy.upstreams.primary.oauth }}"
+                    local primary_api_host = "{{ .Values.proxy.upstreams.primary.api }}"
                     local primary_port = "{{ .Values.proxy.upstreams.primary.port }}"
-                    local secondary_host = "{{ .Values.proxy.upstreams.secondary.oauth }}"
+                    local secondary_oauth_host = "{{ .Values.proxy.upstreams.secondary.oauth }}"
+                    local secondary_api_host = "{{ .Values.proxy.upstreams.secondary.api }}"
                     local secondary_port = "{{ .Values.proxy.upstreams.secondary.port }}"
 
                     local chosen_upstream = ""
                     local chosen_host = ""
 
-                    -- Check primary server health
-                    ngx.log(ngx.INFO, "Checking primary server health: " .. primary_host .. ":" .. primary_port)
-                    local primary_res, primary_err = httpc:request_uri("https://" .. primary_host .. ":" .. primary_port .. "/healthz", {
+                    -- Check primary upstream health (both OAuth and API must be healthy)
+                    ngx.log(ngx.INFO, "Checking primary upstream health...")
+
+                    local primary_oauth_res, primary_oauth_err = httpc:request_uri("https://" .. primary_oauth_host .. ":" .. primary_port .. "/healthz", {
                         method = "GET",
                         timeout = 3000,
                         ssl_verify = false
                     })
 
-                    local primary_healthy = false
-                    if primary_res and primary_res.status == 200 and primary_res.body and string.match(primary_res.body, "ok") then
-                        primary_healthy = true
-                        ngx.log(ngx.INFO, "Primary server is healthy")
-                    else
-                        ngx.log(ngx.WARN, "Primary server health check failed - status: " .. (primary_res and primary_res.status or "none") .. ", body: " .. (primary_res and primary_res.body or "none") .. ", error: " .. (primary_err or "none"))
-                    end
+                    local primary_api_res, primary_api_err = httpc:request_uri("https://" .. primary_api_host .. ":" .. primary_port .. "/healthz", {
+                        method = "GET",
+                        timeout = 3000,
+                        ssl_verify = false
+                    })
+
+                    local primary_oauth_healthy = primary_oauth_res and primary_oauth_res.status == 200 and primary_oauth_res.body and string.match(primary_oauth_res.body, "ok")
+                    local primary_api_healthy = primary_api_res and primary_api_res.status == 200 and primary_api_res.body and string.match(primary_api_res.body, "ok")
+                    local primary_healthy = primary_oauth_healthy and primary_api_healthy
 
                     if primary_healthy then
-                        chosen_upstream = primary_host .. ":" .. primary_port
-                        chosen_host = primary_host
-                        ngx.log(ngx.INFO, "Using primary server: " .. chosen_upstream)
+                        chosen_upstream = primary_oauth_host .. ":" .. primary_port
+                        chosen_host = primary_oauth_host
+                        ngx.log(ngx.INFO, "Primary upstream is healthy (OAuth + API), using: " .. chosen_upstream)
                     else
-                        -- Check secondary server health
-                        ngx.log(ngx.INFO, "Checking secondary server health: " .. secondary_host .. ":" .. secondary_port)
-                        local secondary_res, secondary_err = httpc:request_uri("https://" .. secondary_host .. ":" .. secondary_port .. "/healthz", {
+                        ngx.log(ngx.WARN, "Primary upstream unhealthy - OAuth: " .. tostring(primary_oauth_healthy) .. ", API: " .. tostring(primary_api_healthy))
+
+                        -- Check secondary upstream health (both OAuth and API must be healthy)
+                        ngx.log(ngx.INFO, "Checking secondary upstream health...")
+
+                        local secondary_oauth_res, secondary_oauth_err = httpc:request_uri("https://" .. secondary_oauth_host .. ":" .. secondary_port .. "/healthz", {
                             method = "GET",
                             timeout = 3000,
                             ssl_verify = false
                         })
 
-                        local secondary_healthy = false
-                        if secondary_res and secondary_res.status == 200 and secondary_res.body and string.match(secondary_res.body, "ok") then
-                            secondary_healthy = true
-                            ngx.log(ngx.INFO, "Secondary server is healthy")
-                        else
-                            ngx.log(ngx.WARN, "Secondary server health check failed - status: " .. (secondary_res and secondary_res.status or "none") .. ", body: " .. (secondary_res and secondary_res.body or "none") .. ", error: " .. (secondary_err or "none"))
-                        end
+                        local secondary_api_res, secondary_api_err = httpc:request_uri("https://" .. secondary_api_host .. ":" .. secondary_port .. "/healthz", {
+                            method = "GET",
+                            timeout = 3000,
+                            ssl_verify = false
+                        })
+
+                        local secondary_oauth_healthy = secondary_oauth_res and secondary_oauth_res.status == 200 and secondary_oauth_res.body and string.match(secondary_oauth_res.body, "ok")
+                        local secondary_api_healthy = secondary_api_res and secondary_api_res.status == 200 and secondary_api_res.body and string.match(secondary_api_res.body, "ok")
+                        local secondary_healthy = secondary_oauth_healthy and secondary_api_healthy
 
                         if secondary_healthy then
-                            chosen_upstream = secondary_host .. ":" .. secondary_port
-                            chosen_host = secondary_host
-                            ngx.log(ngx.INFO, "Using secondary server: " .. chosen_upstream)
+                            chosen_upstream = secondary_oauth_host .. ":" .. secondary_port
+                            chosen_host = secondary_oauth_host
+                            ngx.log(ngx.INFO, "Secondary upstream is healthy (OAuth + API), using: " .. chosen_upstream)
                         else
-                            -- Both servers are unhealthy, use secondary as fallback
-                            chosen_upstream = secondary_host .. ":" .. secondary_port
-                            chosen_host = secondary_host
-                            ngx.log(ngx.ERR, "Both servers are unhealthy, falling back to secondary: " .. chosen_upstream)
+                            ngx.log(ngx.ERR, "Both upstreams unhealthy - Secondary OAuth: " .. tostring(secondary_oauth_healthy) .. ", API: " .. tostring(secondary_api_healthy) .. " - falling back to secondary")
+                            chosen_upstream = secondary_oauth_host .. ":" .. secondary_port
+                            chosen_host = secondary_oauth_host
                         end
                     end
 
@@ -138,44 +148,71 @@ data:
                     local http = require "resty.http"
                     local httpc = http.new()
 
-                    -- Health check first to determine healthy hosts
+                    -- Health check first to determine healthy upstreams (both OAuth and API must be healthy)
+                    local primary_oauth_host = "{{ .Values.proxy.upstreams.primary.oauth }}"
                     local primary_api_host = "{{ .Values.proxy.upstreams.primary.api }}"
-                    local primary_api_port = "{{ .Values.proxy.upstreams.primary.port }}"
+                    local primary_port = "{{ .Values.proxy.upstreams.primary.port }}"
+                    local secondary_oauth_host = "{{ .Values.proxy.upstreams.secondary.oauth }}"
                     local secondary_api_host = "{{ .Values.proxy.upstreams.secondary.api }}"
-                    local secondary_api_port = "{{ .Values.proxy.upstreams.secondary.port }}"
+                    local secondary_port = "{{ .Values.proxy.upstreams.secondary.port }}"
                     local primary_oidc_host = "{{ .Values.proxy.upstreams.primary.oidc }}"
                     local primary_oidc_port = "{{ .Values.proxy.upstreams.primary.port }}"
 
-                    -- Determine healthy API backend
+                    -- Determine healthy upstream backend
                     local healthy_api_host = ""
                     local healthy_api_port = ""
 
-                    local primary_res, primary_err = httpc:request_uri("https://" .. primary_api_host .. ":" .. primary_api_port .. "/healthz", {
+                    -- Check primary upstream health (both OAuth and API must be healthy)
+                    ngx.log(ngx.INFO, "Checking primary upstream health for APIs...")
+
+                    local primary_oauth_res, primary_oauth_err = httpc:request_uri("https://" .. primary_oauth_host .. ":" .. primary_port .. "/healthz", {
                         method = "GET",
                         timeout = 3000,
                         ssl_verify = false
                     })
 
-                    if primary_res and primary_res.status == 200 and primary_res.body and string.match(primary_res.body, "ok") then
+                    local primary_api_res, primary_api_err = httpc:request_uri("https://" .. primary_api_host .. ":" .. primary_port .. "/healthz", {
+                        method = "GET",
+                        timeout = 3000,
+                        ssl_verify = false
+                    })
+
+                    local primary_oauth_healthy = primary_oauth_res and primary_oauth_res.status == 200 and primary_oauth_res.body and string.match(primary_oauth_res.body, "ok")
+                    local primary_api_healthy = primary_api_res and primary_api_res.status == 200 and primary_api_res.body and string.match(primary_api_res.body, "ok")
+                    local primary_healthy = primary_oauth_healthy and primary_api_healthy
+
+                    if primary_healthy then
                         healthy_api_host = primary_api_host
-                        healthy_api_port = primary_api_port
-                        ngx.log(ngx.INFO, "Primary API server is healthy")
+                        healthy_api_port = primary_port
+                        ngx.log(ngx.INFO, "Primary upstream is healthy (OAuth + API), using API: " .. healthy_api_host)
                     else
-                        ngx.log(ngx.WARN, "Primary API server unhealthy, checking secondary")
-                        local secondary_res, secondary_err = httpc:request_uri("https://" .. secondary_api_host .. ":" .. secondary_api_port .. "/healthz", {
+                        ngx.log(ngx.WARN, "Primary upstream unhealthy - OAuth: " .. tostring(primary_oauth_healthy) .. ", API: " .. tostring(primary_api_healthy) .. ", checking secondary")
+
+                        -- Check secondary upstream health (both OAuth and API must be healthy)
+                        local secondary_oauth_res, secondary_oauth_err = httpc:request_uri("https://" .. secondary_oauth_host .. ":" .. secondary_port .. "/healthz", {
                             method = "GET",
                             timeout = 3000,
                             ssl_verify = false
                         })
 
-                        if secondary_res and secondary_res.status == 200 and secondary_res.body and string.match(secondary_res.body, "ok") then
+                        local secondary_api_res, secondary_api_err = httpc:request_uri("https://" .. secondary_api_host .. ":" .. secondary_port .. "/healthz", {
+                            method = "GET",
+                            timeout = 3000,
+                            ssl_verify = false
+                        })
+
+                        local secondary_oauth_healthy = secondary_oauth_res and secondary_oauth_res.status == 200 and secondary_oauth_res.body and string.match(secondary_oauth_res.body, "ok")
+                        local secondary_api_healthy = secondary_api_res and secondary_api_res.status == 200 and secondary_api_res.body and string.match(secondary_api_res.body, "ok")
+                        local secondary_healthy = secondary_oauth_healthy and secondary_api_healthy
+
+                        if secondary_healthy then
                             healthy_api_host = secondary_api_host
-                            healthy_api_port = secondary_api_port
-                            ngx.log(ngx.INFO, "Using secondary API server: " .. healthy_api_host)
+                            healthy_api_port = secondary_port
+                            ngx.log(ngx.INFO, "Secondary upstream is healthy (OAuth + API), using API: " .. healthy_api_host)
                         else
+                            ngx.log(ngx.ERR, "Both upstreams unhealthy - Secondary OAuth: " .. tostring(secondary_oauth_healthy) .. ", API: " .. tostring(secondary_api_healthy) .. " - using secondary")
                             healthy_api_host = secondary_api_host
-                            healthy_api_port = secondary_api_port
-                            ngx.log(ngx.ERR, "Both API servers unhealthy, using secondary")
+                            healthy_api_port = secondary_port
                         end
                     end
 
