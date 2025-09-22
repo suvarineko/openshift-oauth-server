@@ -50,103 +50,193 @@ data:
             set $chosen_upstream "";
             set $target_path "";
             set $host_header "";
+            set $primary_healthy "";
+            set $secondary_healthy "";
 
             location / {
                 access_log /dev/stdout main;
                 error_log /dev/stderr debug;
-                
-                # # Log the original request details
-                # access_by_lua_block {
-                #     ngx.log(ngx.INFO, "OAuth request: " .. ngx.var.request_method .. " " .. ngx.var.request_uri)
-                #     ngx.log(ngx.INFO, "Original Host: " .. (ngx.var.http_host or "none"))
-                #     ngx.log(ngx.INFO, "Proxy Host will be: {{ .Values.proxy.upstreams.primary.oauth }}")
-                #     ngx.log(ngx.INFO, "User-Agent: " .. (ngx.var.http_user_agent or "none"))
-                #     if ngx.var.args then
-                #         ngx.log(ngx.INFO, "Query params: " .. ngx.var.args)
-                #     end
-                    
-                #     -- Log all headers for debugging
-                #     local h = ngx.req.get_headers()
-                #     for k, v in pairs(h) do
-                #         if k:lower() == "authorization" or k:lower() == "cookie" then
-                #             ngx.log(ngx.INFO, "Header " .. k .. ": [REDACTED]")
-                #         else
-                #             ngx.log(ngx.INFO, "Header " .. k .. ": " .. tostring(v))
-                #         end
-                #     end
-                # }
-                
-                proxy_pass https://oauth_backend;
+
+                access_by_lua_block {
+                    local http = require "resty.http"
+                    local httpc = http.new()
+
+                    local primary_host = "{{ .Values.proxy.upstreams.primary.oauth }}"
+                    local primary_port = "{{ .Values.proxy.upstreams.primary.port }}"
+                    local secondary_host = "{{ .Values.proxy.upstreams.secondary.oauth }}"
+                    local secondary_port = "{{ .Values.proxy.upstreams.secondary.port }}"
+
+                    local chosen_upstream = ""
+                    local chosen_host = ""
+
+                    -- Check primary server health
+                    ngx.log(ngx.INFO, "Checking primary server health: " .. primary_host .. ":" .. primary_port)
+                    local primary_res, primary_err = httpc:request_uri("https://" .. primary_host .. ":" .. primary_port .. "/healthz", {
+                        method = "GET",
+                        timeout = 3000,
+                        ssl_verify = false
+                    })
+
+                    local primary_healthy = false
+                    if primary_res and primary_res.status == 200 and primary_res.body and string.match(primary_res.body, "ok") then
+                        primary_healthy = true
+                        ngx.log(ngx.INFO, "Primary server is healthy")
+                    else
+                        ngx.log(ngx.WARN, "Primary server health check failed - status: " .. (primary_res and primary_res.status or "none") .. ", body: " .. (primary_res and primary_res.body or "none") .. ", error: " .. (primary_err or "none"))
+                    end
+
+                    if primary_healthy then
+                        chosen_upstream = primary_host .. ":" .. primary_port
+                        chosen_host = primary_host
+                        ngx.log(ngx.INFO, "Using primary server: " .. chosen_upstream)
+                    else
+                        -- Check secondary server health
+                        ngx.log(ngx.INFO, "Checking secondary server health: " .. secondary_host .. ":" .. secondary_port)
+                        local secondary_res, secondary_err = httpc:request_uri("https://" .. secondary_host .. ":" .. secondary_port .. "/healthz", {
+                            method = "GET",
+                            timeout = 3000,
+                            ssl_verify = false
+                        })
+
+                        local secondary_healthy = false
+                        if secondary_res and secondary_res.status == 200 and secondary_res.body and string.match(secondary_res.body, "ok") then
+                            secondary_healthy = true
+                            ngx.log(ngx.INFO, "Secondary server is healthy")
+                        else
+                            ngx.log(ngx.WARN, "Secondary server health check failed - status: " .. (secondary_res and secondary_res.status or "none") .. ", body: " .. (secondary_res and secondary_res.body or "none") .. ", error: " .. (secondary_err or "none"))
+                        end
+
+                        if secondary_healthy then
+                            chosen_upstream = secondary_host .. ":" .. secondary_port
+                            chosen_host = secondary_host
+                            ngx.log(ngx.INFO, "Using secondary server: " .. chosen_upstream)
+                        else
+                            -- Both servers are unhealthy, use secondary as fallback
+                            chosen_upstream = secondary_host .. ":" .. secondary_port
+                            chosen_host = secondary_host
+                            ngx.log(ngx.ERR, "Both servers are unhealthy, falling back to secondary: " .. chosen_upstream)
+                        end
+                    end
+
+                    ngx.var.chosen_upstream = chosen_upstream
+                    ngx.var.host_header = chosen_host
+                }
+
+                proxy_pass https://$chosen_upstream;
                 proxy_ssl_server_name on;
-                proxy_set_header Host {{ .Values.proxy.upstreams.primary.oauth }};
-                
-                # # Additional headers for better upstream compatibility
-                # proxy_set_header X-Real-IP $remote_addr;
-                # proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                # proxy_set_header X-Forwarded-Proto $scheme;
-                # proxy_set_header X-Forwarded-Host $host;
-                # proxy_set_header Upgrade $http_upgrade;
-                # proxy_set_header Connection "upgrade";
-                
-                # # Enhanced error handling - include 400 Bad Request
-                # proxy_intercept_errors on;
-                # error_page 400 404 500 502 503 504;
+                proxy_set_header Host $host_header;
+
+                # Connection and timeout settings
+                proxy_connect_timeout 5s;
+                proxy_read_timeout 30s;
+                proxy_send_timeout 30s;
             }
 
             location /apis {
                 access_by_lua_block {
                     local cjson = require "cjson"
+                    local http = require "resty.http"
+                    local httpc = http.new()
+
+                    -- Health check first to determine healthy hosts
+                    local primary_api_host = "{{ .Values.proxy.upstreams.primary.api }}"
+                    local primary_api_port = "{{ .Values.proxy.upstreams.primary.port }}"
+                    local secondary_api_host = "{{ .Values.proxy.upstreams.secondary.api }}"
+                    local secondary_api_port = "{{ .Values.proxy.upstreams.secondary.port }}"
+                    local primary_oidc_host = "{{ .Values.proxy.upstreams.primary.oidc }}"
+                    local primary_oidc_port = "{{ .Values.proxy.upstreams.primary.port }}"
+
+                    -- Determine healthy API backend
+                    local healthy_api_host = ""
+                    local healthy_api_port = ""
+
+                    local primary_res, primary_err = httpc:request_uri("https://" .. primary_api_host .. ":" .. primary_api_port .. "/healthz", {
+                        method = "GET",
+                        timeout = 3000,
+                        ssl_verify = false
+                    })
+
+                    if primary_res and primary_res.status == 200 and primary_res.body and string.match(primary_res.body, "ok") then
+                        healthy_api_host = primary_api_host
+                        healthy_api_port = primary_api_port
+                        ngx.log(ngx.INFO, "Primary API server is healthy")
+                    else
+                        ngx.log(ngx.WARN, "Primary API server unhealthy, checking secondary")
+                        local secondary_res, secondary_err = httpc:request_uri("https://" .. secondary_api_host .. ":" .. secondary_api_port .. "/healthz", {
+                            method = "GET",
+                            timeout = 3000,
+                            ssl_verify = false
+                        })
+
+                        if secondary_res and secondary_res.status == 200 and secondary_res.body and string.match(secondary_res.body, "ok") then
+                            healthy_api_host = secondary_api_host
+                            healthy_api_port = secondary_api_port
+                            ngx.log(ngx.INFO, "Using secondary API server: " .. healthy_api_host)
+                        else
+                            healthy_api_host = secondary_api_host
+                            healthy_api_port = secondary_api_port
+                            ngx.log(ngx.ERR, "Both API servers unhealthy, using secondary")
+                        end
+                    end
+
+                    -- Now use the original logic with healthy hosts
                     local upstream = "oauth_api_backend"
                     local target_path = ngx.var.uri
-                    local host_header = "{{ .Values.proxy.upstreams.primary.api }}"
-                    
+                    local host_header = healthy_api_host
+
                     -- Read request body
                     ngx.req.read_body()
                     local body = ngx.req.get_body_data()
-                    
+
                     if body then
                         local success, json_data = pcall(cjson.decode, body)
                         if success and json_data then
                             -- Check if it's a TokenReview request
-                            if json_data.kind == "TokenReview" and 
-                               json_data.spec and 
+                            if json_data.kind == "TokenReview" and
+                               json_data.spec and
                                json_data.spec.token then
-                                
+
                                 local token = json_data.spec.token
                                 if string.sub(token, 1, 7) == "sha256~" then
                                     upstream = "oauth_api_backend"
                                     target_path = ngx.var.uri
-                                    host_header = "{{ .Values.proxy.upstreams.primary.api }}"
+                                    host_header = healthy_api_host
                                     ngx.log(ngx.INFO, "TokenReview with oauth token - routing to oauth_api_backend" .. ngx.var.uri)
                                 else
                                     upstream = "oidc_api_backend"
                                     target_path = "/validate-token"
-                                    host_header = "{{ .Values.proxy.upstreams.primary.oidc }}"
+                                    host_header = primary_oidc_host  -- OIDC doesn't have failover yet
                                     ngx.log(ngx.INFO, "TokenReview with oidc token - routing to oidc_api_backend/validate-token")
                                 end
                             else
                                 -- Not a TokenReview or missing token - use oauth_api_backend
                                 upstream = "oauth_api_backend"
                                 target_path = ngx.var.uri
-                                host_header = "{{ .Values.proxy.upstreams.primary.api }}"
+                                host_header = healthy_api_host
                                 ngx.log(ngx.INFO, "Not a TokenReview request - routing to oauth_api_backend" .. ngx.var.uri)
                             end
                         else
                             -- Invalid JSON - use oauth_api_backend
                             upstream = "oauth_api_backend"
                             target_path = ngx.var.uri
-                            host_header = "{{ .Values.proxy.upstreams.primary.api }}"
+                            host_header = healthy_api_host
                             ngx.log(ngx.INFO, "Not a JSON in request body - routing to oauth_api_backend" .. ngx.var.uri)
                         end
                     else
                         -- No body - use oauth_api_backend
                         upstream = "oauth_api_backend"
                         target_path = ngx.var.uri
-                        host_header = "{{ .Values.proxy.upstreams.primary.api }}"
+                        host_header = healthy_api_host
                         ngx.log(ngx.INFO, "No request body - routing to oauth_api_backend" .. ngx.var.uri)
                     end
-                    
-                    ngx.var.chosen_upstream = upstream
+
+                    -- Set the chosen upstream based on the upstream type
+                    if upstream == "oidc_api_backend" then
+                        ngx.var.chosen_upstream = primary_oidc_host .. ":" .. primary_oidc_port
+                    else
+                        ngx.var.chosen_upstream = healthy_api_host .. ":" .. healthy_api_port
+                    end
+
                     ngx.var.target_path = target_path
                     ngx.var.host_header = host_header
                 }
@@ -154,8 +244,11 @@ data:
                 proxy_pass https://$chosen_upstream$target_path;
                 proxy_ssl_server_name on;
                 proxy_set_header Host $host_header;
-                # proxy_set_header Upgrade $http_upgrade;
-                # proxy_set_header Connection "upgrade";
+
+                # Connection and timeout settings
+                proxy_connect_timeout 5s;
+                proxy_read_timeout 30s;
+                proxy_send_timeout 30s;
             }
 
             location /nginx-health {
