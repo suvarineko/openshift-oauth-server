@@ -1,0 +1,166 @@
+# Default values for oauth-server
+clusterDomain: "k8s.r4c-test.solution.sbt"
+
+replicaCount: 1
+
+image:
+  repository: "registry.apps.k8s.ose-prod.solution.sbt/openshift-release-dev/ocp-v4.0-art-dev"
+  pullPolicy: IfNotPresent
+  tag: "4.13.56-x86_64-oauth-server"
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsUser: 0
+  # capabilities:
+  #   drop:
+  #     - MKNOD
+  # readOnlyRootFilesystem: false
+
+securityContext: {}
+
+service:
+  type: ClusterIP
+  port: 6443
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: cluster-ca
+    nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+    nginx.ingress.kubernetes.io/ssl-passthrough: 'true'
+    nginx.ingress.kubernetes.io/ssl-redirect: 'true'
+  hosts:
+    - host: oauth-console.apps.k8s.r4c-test.solution.sbt
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls:
+    - hosts:
+        - oauth-console.apps.k8s.r4c-test.solution.sbt
+        - proxy-auth.apps.k8s.r4c-test.solution.sbt
+      secretName: oauth-console-tls
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 150Mi
+  requests:
+    cpu: 10m
+    memory: 50Mi
+
+nodeSelector: {}
+
+tolerations:
+  - operator: Exists
+  - key: node.kubernetes.io/not-ready
+    operator: Exists
+    effect: NoExecute
+  - key: node.kubernetes.io/unreachable
+    operator: Exists
+    effect: NoExecute
+  - key: node.kubernetes.io/disk-pressure
+    operator: Exists
+    effect: NoSchedule
+  - key: node.kubernetes.io/memory-pressure
+    operator: Exists
+    effect: NoSchedule
+  - key: node.kubernetes.io/pid-pressure
+    operator: Exists
+    effect: NoSchedule
+  - key: node.kubernetes.io/unschedulable
+    operator: Exists
+    effect: NoSchedule
+
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app: openshift-oauth-server
+            oauth-openshift-anti-affinity: 'true'
+        topologyKey: kubernetes.io/hostname
+
+# Monitoring settings
+monitoring:
+  # Enable ServiceMonitor for Prometheus
+  enabled: true
+  # Prometheus operator labels for ServiceMonitor
+  labels: {}
+
+# Custom routes for OAuth server (OpenShift specific)
+routes:
+  enabled: false
+  host: ""
+  tlsTermination: reencrypt
+  annotations: {}
+
+tls:
+  etcdIssuer: etcd-ca
+  clusterIssuer: cluster-ca
+
+redirectURIs: []
+browserClientRedirectURI: proxy-auth
+
+ldap:
+  whitelistGroups: []
+
+# Nginx proxy settings
+proxy:
+  enabled: true
+  image:
+    repository: registry.apps.k8s.ose-prod.solution.sbt/openresty/openresty
+    tag: "1.25.3.1-alpine"
+    pullPolicy: IfNotPresent
+  port: 32443
+  # Domain name for this proxy (used in Host header modifications)
+  domain: "proxy-auth.apps.k8s.r4c-test.solution.sbt"
+  # Enable detailed debug logging (default: false)
+  debug: false
+  # OAuth proxy endpoints for failover
+  upstreams:
+    primary:
+      oidc: "dowa.apps.k8s.r4c-test.solution.sbt"
+      oauth: "oauth-console.apps.k8s.osad-testing.solution.sbt"
+      api: "oauth-apiserver.apps.k8s.osad-testing.solution.sbt"
+      port: 443
+    secondary:
+      oauth: "oauth-console.apps.k8s.r4c-test.solution.sbt"
+      api: "oauth-apiserver.apps.k8s.r4c-test.solution.sbt"
+      port: 443
+  ingress:
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+      nginx.ingress.kubernetes.io/ssl-passthrough: 'true'
+      nginx.ingress.kubernetes.io/ssl-redirect: 'true'
+  # Health check configuration
+  healthCheck:
+    interval: 5  # seconds
+    timeout: 3   # seconds
+    rise: 2      # successful checks before marking as up
+    fall: 3      # failed checks before marking as down
+  nodeSelector:
+    node-role.kubernetes.io/master: ""
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+  args: []
+  env: []

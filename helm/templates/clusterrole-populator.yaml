@@ -1,0 +1,12 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: redirurl-populator
+rules:
+  - apiGroups: ["oauth.openshift.io"]
+    resources: ["oauthclients"]
+    verbs: ["get", "update", "patch"]
+    # Least privilege: uncomment and list the specific OAuthClient name(s) this
+    # ServiceAccount may touch. (Works because the populator only does get/update
+    # by name — it never lists.)
+    # resourceNames: ["spoke-1-oauthclient"]

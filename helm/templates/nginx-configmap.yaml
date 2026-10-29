@@ -19,28 +19,29 @@ data:
         fastcgi_temp_path /tmp/nginx_fastcgi_temp;
         uwsgi_temp_path /tmp/nginx_uwsgi_temp;
         scgi_temp_path /tmp/nginx_scgi_temp;
-        log_format main '$remote_addr - $remote_user [$time_local] "$request" '
-                        '$status $body_bytes_sent "$http_referer" '
-                        '"$http_user_agent" "$http_x_forwarded_for" '
-                        'upstream_addr="$upstream_addr" upstream_status="$upstream_status"';
+        log_format main '$remote_addr - $remote_user [$time_local] "$request" ' '$status $body_bytes_sent "$http_referer" ' '"$http_user_agent" "$http_x_forwarded_for" ' 'upstream_addr="$upstream_addr" upstream_status="$upstream_status"';
         access_log /dev/stdout main;
-        upstream oauth_backend {
-            server {{ .Values.proxy.upstreams.primary.oauth }}:{{ .Values.proxy.upstreams.primary.port }} fail_timeout=15s max_fails=3;
-            server {{ .Values.proxy.upstreams.secondary.oauth }}:{{ .Values.proxy.upstreams.secondary.port }} backup;
-        }
 
-        upstream oidc_api_backend {
-            server {{ .Values.proxy.upstreams.primary.oidc }}:{{ .Values.proxy.upstreams.primary.port }};
-        }
+        # Shared memory for health check caching
+        lua_shared_dict health_cache 1m;
 
-        upstream oauth_api_backend {
-            server {{ .Values.proxy.upstreams.primary.api }}:{{ .Values.proxy.upstreams.primary.port }} fail_timeout=15s max_fails=3;
-            server {{ .Values.proxy.upstreams.secondary.api }}:{{ .Values.proxy.upstreams.secondary.port }} backup;
-        }
+        #upstream oauth_backend {
+        #    server oauth-console1.apps.k8s.prod-01.solution.sbt:443 fail_timeout=15s max_fails=3;
+        #    server oauth-console.apps.k8s.osad-testing.solution.sbt:443 backup;
+        #}
+
+        #upstream oidc_api_backend {
+        #    server dowa.apps.k8s.osad-testing.solution.sbt:443;
+        #}
+
+        #upstream oauth_api_backend {
+        #    server oauth-apiserver1.apps.k8s.prod-01.solution.sbt:443 fail_timeout=15s max_fails=3;
+        #    server oauth-apiserver.apps.k8s.osad-testing.solution.sbt:443 backup;
+        #}
 
         server {
-            listen {{ .Values.proxy.port }} ssl;
-            server_name {{ .Values.proxy.domain }};
+            listen 32443 ssl;
+            server_name proxy-auth.apps.k8s.osad-testing.solution.sbt;
             ssl_certificate /etc/tls/tls.crt;
             ssl_certificate_key /etc/tls/tls.key;
             ssl_protocols TLSv1.2 TLSv1.3;
@@ -59,8 +60,9 @@ data:
                 error_log /dev/stderr debug;
 
                 access_by_lua_block {
-                    local http = require "resty.http"
-                    local httpc = http.new()
+                    local health_cache = ngx.shared.health_cache
+                    local cache_ttl = 30  -- Cache health checks for 30 seconds
+                    local now = ngx.time()
 
                     local primary_oauth_host = "{{ .Values.proxy.upstreams.primary.oauth }}"
                     local primary_api_host = "{{ .Values.proxy.upstreams.primary.api }}"
@@ -72,59 +74,89 @@ data:
                     local chosen_upstream = ""
                     local chosen_host = ""
 
-                    -- Check primary upstream health (both OAuth and API must be healthy)
-                    ngx.log(ngx.INFO, "Checking primary upstream health...")
+                    -- Check cache first
+                    local primary_healthy_cached = health_cache:get("primary_healthy")
+                    local primary_last_check = health_cache:get("primary_last_check") or 0
+                    local cache_age = now - primary_last_check
 
-                    local primary_oauth_res, primary_oauth_err = httpc:request_uri("https://" .. primary_oauth_host .. ":" .. primary_port .. "/healthz", {
-                        method = "GET",
-                        timeout = 3000,
-                        ssl_verify = false
-                    })
+                    -- Function to perform health check
+                    local function check_upstream_health(oauth_host, api_host, port, name)
+                        local http = require "resty.http"
+                        local httpc = http.new()
 
-                    local primary_api_res, primary_api_err = httpc:request_uri("https://" .. primary_api_host .. ":" .. primary_port .. "/healthz", {
-                        method = "GET",
-                        timeout = 3000,
-                        ssl_verify = false
-                    })
+                        local oauth_res = httpc:request_uri("https://" .. oauth_host .. ":" .. port .. "/healthz", {
+                            method = "GET",
+                            timeout = 3000,
+                            ssl_verify = false
+                        })
 
-                    local primary_oauth_healthy = primary_oauth_res and primary_oauth_res.status == 200 and primary_oauth_res.body and string.match(primary_oauth_res.body, "ok")
-                    local primary_api_healthy = primary_api_res and primary_api_res.status == 200 and primary_api_res.body and string.match(primary_api_res.body, "ok")
-                    local primary_healthy = primary_oauth_healthy and primary_api_healthy
+                        httpc = http.new()  -- Create new instance for second request
+                        local api_res = httpc:request_uri("https://" .. api_host .. ":" .. port .. "/healthz", {
+                            method = "GET",
+                            timeout = 3000,
+                            ssl_verify = false
+                        })
 
+                        local oauth_healthy = oauth_res and oauth_res.status == 200 and oauth_res.body and string.match(oauth_res.body, "ok")
+                        local api_healthy = api_res and api_res.status == 200 and api_res.body and string.match(api_res.body, "ok")
+                        local is_healthy = oauth_healthy and api_healthy
+
+                        ngx.log(ngx.INFO, name .. " health check - OAuth: " .. tostring(oauth_healthy) .. ", API: " .. tostring(api_healthy) .. ", Overall: " .. tostring(is_healthy))
+                        return is_healthy
+                    end
+
+                    local primary_healthy = false
+
+                    if cache_age >= cache_ttl then
+                        -- Cache expired or doesn't exist, perform health check
+                        -- Try to acquire lock to prevent multiple simultaneous checks
+                        local lock_key = "health_check_lock"
+                        local ok, err = health_cache:add(lock_key, 1, 5)  -- 5 second lock
+
+                        if ok then
+                            -- We got the lock, perform health check
+                            ngx.log(ngx.INFO, "Cache expired (" .. cache_age .. "s), performing health check...")
+                            primary_healthy = check_upstream_health(primary_oauth_host, primary_api_host, primary_port, "Primary")
+
+                            -- Update cache
+                            health_cache:set("primary_healthy", primary_healthy and 1 or 0, cache_ttl)
+                            health_cache:set("primary_last_check", now, cache_ttl)
+
+                            -- If primary is unhealthy, check secondary
+                            if not primary_healthy then
+                                local secondary_healthy = check_upstream_health(secondary_oauth_host, secondary_api_host, secondary_port, "Secondary")
+                                health_cache:set("secondary_healthy", secondary_healthy and 1 or 0, cache_ttl)
+                            end
+
+                            health_cache:delete(lock_key)  -- Release lock
+                        else
+                            -- Another request is checking, use stale cache if available or wait briefly
+                            ngx.log(ngx.INFO, "Health check in progress by another request, using cached value")
+                            primary_healthy = (primary_healthy_cached == 1)
+                        end
+                    else
+                        -- Cache is fresh, use cached value
+                        primary_healthy = (primary_healthy_cached == 1)
+                        ngx.log(ngx.DEBUG, "Using cached health status (age: " .. cache_age .. "s) - Primary: " .. tostring(primary_healthy))
+                    end
+
+                    -- Choose upstream based on health status
                     if primary_healthy then
                         chosen_upstream = primary_oauth_host .. ":" .. primary_port
                         chosen_host = primary_oauth_host
-                        ngx.log(ngx.INFO, "Primary upstream is healthy (OAuth + API), using: " .. chosen_upstream)
+                        ngx.log(ngx.DEBUG, "Using primary upstream: " .. chosen_upstream)
                     else
-                        ngx.log(ngx.WARN, "Primary upstream unhealthy - OAuth: " .. tostring(primary_oauth_healthy) .. ", API: " .. tostring(primary_api_healthy))
-
-                        -- Check secondary upstream health (both OAuth and API must be healthy)
-                        ngx.log(ngx.INFO, "Checking secondary upstream health...")
-
-                        local secondary_oauth_res, secondary_oauth_err = httpc:request_uri("https://" .. secondary_oauth_host .. ":" .. secondary_port .. "/healthz", {
-                            method = "GET",
-                            timeout = 3000,
-                            ssl_verify = false
-                        })
-
-                        local secondary_api_res, secondary_api_err = httpc:request_uri("https://" .. secondary_api_host .. ":" .. secondary_port .. "/healthz", {
-                            method = "GET",
-                            timeout = 3000,
-                            ssl_verify = false
-                        })
-
-                        local secondary_oauth_healthy = secondary_oauth_res and secondary_oauth_res.status == 200 and secondary_oauth_res.body and string.match(secondary_oauth_res.body, "ok")
-                        local secondary_api_healthy = secondary_api_res and secondary_api_res.status == 200 and secondary_api_res.body and string.match(secondary_api_res.body, "ok")
-                        local secondary_healthy = secondary_oauth_healthy and secondary_api_healthy
-
-                        if secondary_healthy then
+                        -- Check secondary health from cache
+                        local secondary_healthy_cached = health_cache:get("secondary_healthy")
+                        if secondary_healthy_cached == 1 then
                             chosen_upstream = secondary_oauth_host .. ":" .. secondary_port
                             chosen_host = secondary_oauth_host
-                            ngx.log(ngx.INFO, "Secondary upstream is healthy (OAuth + API), using: " .. chosen_upstream)
+                            ngx.log(ngx.INFO, "Primary unhealthy, using secondary upstream: " .. chosen_upstream)
                         else
-                            ngx.log(ngx.ERR, "Both upstreams unhealthy - Secondary OAuth: " .. tostring(secondary_oauth_healthy) .. ", API: " .. tostring(secondary_api_healthy) .. " - falling back to secondary")
+                            -- Both unhealthy, fallback to secondary anyway
                             chosen_upstream = secondary_oauth_host .. ":" .. secondary_port
                             chosen_host = secondary_oauth_host
+                            ngx.log(ngx.WARN, "Both upstreams unhealthy, falling back to secondary: " .. chosen_upstream)
                         end
                     end
 
@@ -145,10 +177,10 @@ data:
             location /apis {
                 access_by_lua_block {
                     local cjson = require "cjson"
-                    local http = require "resty.http"
-                    local httpc = http.new()
+                    local health_cache = ngx.shared.health_cache
+                    local cache_ttl = 30  -- Cache health checks for 30 seconds
+                    local now = ngx.time()
 
-                    -- Health check first to determine healthy upstreams (both OAuth and API must be healthy)
                     local primary_oauth_host = "{{ .Values.proxy.upstreams.primary.oauth }}"
                     local primary_api_host = "{{ .Values.proxy.upstreams.primary.api }}"
                     local primary_port = "{{ .Values.proxy.upstreams.primary.port }}"
@@ -158,61 +190,93 @@ data:
                     local primary_oidc_host = "{{ .Values.proxy.upstreams.primary.oidc }}"
                     local primary_oidc_port = "{{ .Values.proxy.upstreams.primary.port }}"
 
-                    -- Determine healthy upstream backend
+                    -- Determine healthy upstream backend using cache
                     local healthy_api_host = ""
                     local healthy_api_port = ""
 
-                    -- Check primary upstream health (both OAuth and API must be healthy)
-                    ngx.log(ngx.INFO, "Checking primary upstream health for APIs...")
+                    -- Check cache first
+                    local primary_healthy_cached = health_cache:get("primary_healthy")
+                    local primary_last_check = health_cache:get("primary_last_check") or 0
+                    local cache_age = now - primary_last_check
 
-                    local primary_oauth_res, primary_oauth_err = httpc:request_uri("https://" .. primary_oauth_host .. ":" .. primary_port .. "/healthz", {
-                        method = "GET",
-                        timeout = 3000,
-                        ssl_verify = false
-                    })
+                    -- Function to perform health check
+                    local function check_upstream_health(oauth_host, api_host, port, name)
+                        local http = require "resty.http"
+                        local httpc = http.new()
 
-                    local primary_api_res, primary_api_err = httpc:request_uri("https://" .. primary_api_host .. ":" .. primary_port .. "/healthz", {
-                        method = "GET",
-                        timeout = 3000,
-                        ssl_verify = false
-                    })
+                        local oauth_res = httpc:request_uri("https://" .. oauth_host .. ":" .. port .. "/healthz", {
+                            method = "GET",
+                            timeout = 3000,
+                            ssl_verify = false
+                        })
 
-                    local primary_oauth_healthy = primary_oauth_res and primary_oauth_res.status == 200 and primary_oauth_res.body and string.match(primary_oauth_res.body, "ok")
-                    local primary_api_healthy = primary_api_res and primary_api_res.status == 200 and primary_api_res.body and string.match(primary_api_res.body, "ok")
-                    local primary_healthy = primary_oauth_healthy and primary_api_healthy
+                        httpc = http.new()  -- Create new instance for second request
+                        local api_res = httpc:request_uri("https://" .. api_host .. ":" .. port .. "/healthz", {
+                            method = "GET",
+                            timeout = 3000,
+                            ssl_verify = false
+                        })
 
+                        local oauth_healthy = oauth_res and oauth_res.status == 200 and oauth_res.body and string.match(oauth_res.body, "ok")
+                        local api_healthy = api_res and api_res.status == 200 and api_res.body and string.match(api_res.body, "ok")
+                        local is_healthy = oauth_healthy and api_healthy
+
+                        ngx.log(ngx.INFO, name .. " health check - OAuth: " .. tostring(oauth_healthy) .. ", API: " .. tostring(api_healthy) .. ", Overall: " .. tostring(is_healthy))
+                        return is_healthy
+                    end
+
+                    local primary_healthy = false
+
+                    if cache_age >= cache_ttl then
+                        -- Cache expired or doesn't exist, perform health check
+                        -- Try to acquire lock to prevent multiple simultaneous checks
+                        local lock_key = "health_check_lock_apis"
+                        local ok, err = health_cache:add(lock_key, 1, 5)  -- 5 second lock
+
+                        if ok then
+                            -- We got the lock, perform health check
+                            ngx.log(ngx.INFO, "Cache expired (" .. cache_age .. "s), performing health check for APIs...")
+                            primary_healthy = check_upstream_health(primary_oauth_host, primary_api_host, primary_port, "Primary")
+
+                            -- Update cache
+                            health_cache:set("primary_healthy", primary_healthy and 1 or 0, cache_ttl)
+                            health_cache:set("primary_last_check", now, cache_ttl)
+
+                            -- If primary is unhealthy, check secondary
+                            if not primary_healthy then
+                                local secondary_healthy = check_upstream_health(secondary_oauth_host, secondary_api_host, secondary_port, "Secondary")
+                                health_cache:set("secondary_healthy", secondary_healthy and 1 or 0, cache_ttl)
+                            end
+
+                            health_cache:delete(lock_key)  -- Release lock
+                        else
+                            -- Another request is checking, use stale cache if available
+                            ngx.log(ngx.INFO, "Health check in progress by another request, using cached value")
+                            primary_healthy = (primary_healthy_cached == 1)
+                        end
+                    else
+                        -- Cache is fresh, use cached value
+                        primary_healthy = (primary_healthy_cached == 1)
+                        ngx.log(ngx.DEBUG, "Using cached health status (age: " .. cache_age .. "s) - Primary: " .. tostring(primary_healthy))
+                    end
+
+                    -- Determine healthy API host based on cached health status
                     if primary_healthy then
                         healthy_api_host = primary_api_host
                         healthy_api_port = primary_port
-                        ngx.log(ngx.INFO, "Primary upstream is healthy (OAuth + API), using API: " .. healthy_api_host)
+                        ngx.log(ngx.DEBUG, "Using primary API: " .. healthy_api_host)
                     else
-                        ngx.log(ngx.WARN, "Primary upstream unhealthy - OAuth: " .. tostring(primary_oauth_healthy) .. ", API: " .. tostring(primary_api_healthy) .. ", checking secondary")
-
-                        -- Check secondary upstream health (both OAuth and API must be healthy)
-                        local secondary_oauth_res, secondary_oauth_err = httpc:request_uri("https://" .. secondary_oauth_host .. ":" .. secondary_port .. "/healthz", {
-                            method = "GET",
-                            timeout = 3000,
-                            ssl_verify = false
-                        })
-
-                        local secondary_api_res, secondary_api_err = httpc:request_uri("https://" .. secondary_api_host .. ":" .. secondary_port .. "/healthz", {
-                            method = "GET",
-                            timeout = 3000,
-                            ssl_verify = false
-                        })
-
-                        local secondary_oauth_healthy = secondary_oauth_res and secondary_oauth_res.status == 200 and secondary_oauth_res.body and string.match(secondary_oauth_res.body, "ok")
-                        local secondary_api_healthy = secondary_api_res and secondary_api_res.status == 200 and secondary_api_res.body and string.match(secondary_api_res.body, "ok")
-                        local secondary_healthy = secondary_oauth_healthy and secondary_api_healthy
-
-                        if secondary_healthy then
+                        -- Check secondary health from cache
+                        local secondary_healthy_cached = health_cache:get("secondary_healthy")
+                        if secondary_healthy_cached == 1 then
                             healthy_api_host = secondary_api_host
                             healthy_api_port = secondary_port
-                            ngx.log(ngx.INFO, "Secondary upstream is healthy (OAuth + API), using API: " .. healthy_api_host)
+                            ngx.log(ngx.INFO, "Primary unhealthy, using secondary API: " .. healthy_api_host)
                         else
-                            ngx.log(ngx.ERR, "Both upstreams unhealthy - Secondary OAuth: " .. tostring(secondary_oauth_healthy) .. ", API: " .. tostring(secondary_api_healthy) .. " - using secondary")
+                            -- Both unhealthy, fallback to secondary anyway
                             healthy_api_host = secondary_api_host
                             healthy_api_port = secondary_port
+                            ngx.log(ngx.WARN, "Both upstreams unhealthy, falling back to secondary API: " .. healthy_api_host)
                         end
                     end
 

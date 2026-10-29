@@ -2,7 +2,6 @@ kind: Secret
 apiVersion: v1
 metadata:
   name: ldap-secret
-  namespace: openshift-config
 data:
   bindPassword: QzZzOTNMeThjaEdhbURz
 type: Opaque
@@ -11,7 +10,6 @@ kind: ConfigMap
 apiVersion: v1
 metadata:
   name: ldap-config
-  namespace: openshift-config
   labels:
     oauth/identity: ldap-infra
 data:
@@ -43,30 +41,14 @@ data:
       tolerateMemberNotFoundErrors: true
       tolerateMemberOutOfScopeErrors: true
   whitelist.txt: |
-    cn=ose-kube-admin,cn=groups,cn=accounts,dc=solution,dc=sbt
-    cn=ose-devops-tuz,cn=groups,cn=accounts,dc=solution,dc=sbt
-    cn=ose-trb-test-tools,cn=groups,cn=accounts,dc=solution,dc=sbt
-    cn=ose-namespace-admins,cn=groups,cn=accounts,dc=solution,dc=sbt
-    cn=ose-trb-operations-and-monitoring,cn=groups,cn=accounts,dc=solution,dc=sbt
-    cn=ose-trb-synapse,cn=groups,cn=accounts,dc=solution,dc=sbt
-    cn=ose-trb-ui-framework,cn=groups,cn=accounts,dc=solution,dc=sbt
-    cn=ose-trb-migration-tools,cn=groups,cn=accounts,dc=solution,dc=sbt
-    cn=ose-trb-security,cn=groups,cn=accounts,dc=solution,dc=sbt
-    cn=ose-trb-process-as-code,cn=groups,cn=accounts,dc=solution,dc=sbt
-    cn=ose-trb-serverless,cn=groups,cn=accounts,dc=solution,dc=sbt
-    cn=ose-trb-business-applications,cn=groups,cn=accounts,dc=solution,dc=sbt
-    cn=ose-lt-trb-test-tools,cn=groups,cn=accounts,dc=solution,dc=sbt
-    cn=ose-first-line,cn=groups,cn=accounts,dc=solution,dc=sbt
-    cn=ose-2nd-line,cn=groups,cn=accounts,dc=solution,dc=sbt
-    cn=ose-arch-cap,cn=groups,cn=accounts,dc=solution,dc=sbt
-    cn=ose-release-team,cn=groups,cn=accounts,dc=solution,dc=sbt
-    cn=ose-cp-admins,cn=groups,cn=accounts,dc=solution,dc=sbt
+  {{- range .Values.ldap.whitelistGroups }}
+    {{ . }}
+  {{- end }}
 ---
 kind: ServiceAccount
 apiVersion: v1
 metadata:
   name: ldap-group-syncer
-  namespace: openshift-config
   labels:
     oauth/identity: ldap-infra
 ---
@@ -93,7 +75,7 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: ldap-group-syncer
-    namespace: openshift-config
+    namespace: {{ .Release.Namespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -103,7 +85,6 @@ kind: CronJob
 apiVersion: batch/v1
 metadata:
   name: cronjob-ldap-group-sync
-  namespace: openshift-config
   labels:
     oauth/identity: ldap-infra
 spec:
@@ -128,7 +109,7 @@ spec:
           securityContext: {}
           containers:
             - name: cronjob-ldap-group-sync
-              image: registry.apps.k8s.ose-prod.solution.sbt/openshift4/ose-cli@sha256:7723c779775a97e0693eb3a5770d020f448c2012c844f911d581d1f1c95ffa4e
+              image: registry.apps.k8s.prod-01.solution.sbt/openshift4/ose-cli@sha256:7723c779775a97e0693eb3a5770d020f448c2012c844f911d581d1f1c95ffa4e
               command:
                 - /bin/bash
                 - '-c'
@@ -157,5 +138,5 @@ spec:
                 secretName: ldap-secret
                 defaultMode: 420
           dnsPolicy: ClusterFirst
-  successfulJobsHistoryLimit: 5
-  failedJobsHistoryLimit: 5
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2

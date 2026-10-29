@@ -9,6 +9,11 @@ spec:
   selector:
     matchLabels:
       {{- include "oauth-server.selectorLabels" . | nindent 6 }}
+  strategy:
+    rollingUpdate:
+      maxSurge: 50%
+      maxUnavailable: 50%
+    type: RollingUpdate
   template:
     metadata:
       {{- with .Values.podAnnotations }}
@@ -70,7 +75,7 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: https
               scheme: HTTPS
             initialDelaySeconds: 5

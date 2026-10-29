@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redirurl-populator-config
+data:
+  # API server of the CENTRAL cluster.
+  KUBE_API_SERVER: {{ .Values.populator.remoteApi }}
+  # Name of the OAuthClient on the central cluster (cluster-scoped).
+  OAUTHCLIENT_NAME: "kubernetes-console"
+  # Redirect URLs to ensure are present (comma / whitespace / newline separated).
+  REDIRECT_URIS: >-
+    https://console.apps.{{ .Values.clusterDomain }}/auth/callback,
+    https://console.apps.{{ .Values.clusterDomain }}/oauth/callback
+  RECONCILE_INTERVAL: "60s"
+  # Certificate verification is disabled by default; set to "false" and add a CA
+  # (KUBE_CA_CERT/KUBE_CA_CERT_FILE) to enable it.
+  KUBE_INSECURE_SKIP_TLS_VERIFY: "true"
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"

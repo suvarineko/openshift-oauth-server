@@ -46,8 +46,21 @@ Selector labels
 {{- define "oauth-server.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "oauth-server.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
-app: oauth-openshift
+app: openshift-oauth-server
 oauth-openshift-anti-affinity: 'true'
+{{- end }}
+
+{{/*
+Preflight: require the OpenShift OAuth API group to be present in the cluster.
+Aborts rendering/installation unless config.openshift.io/v1/OAuth is available.
+Can be disabled by setting apiPreflightCheck=false (e.g. for `helm template` in CI).
+*/}}
+{{- define "oauth-server.requireOpenShiftOAuth" -}}
+{{- if .Values.apiPreflightCheck }}
+{{- if not (.Capabilities.APIVersions.Has "config.openshift.io/v1/OAuth") }}
+{{- fail "\n\nThis chart requires the OpenShift OAuth API (config.openshift.io/v1/OAuth), which is not available in the target cluster.\nInstall this chart on an OpenShift cluster, or set apiPreflightCheck=false to bypass this check." }}
+{{- end }}
+{{- end }}
 {{- end }}
 
 {{/*

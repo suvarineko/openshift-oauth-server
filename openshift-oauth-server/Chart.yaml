@@ -1,0 +1,8 @@
+apiVersion: v2
+appVersion: 4.12.0
+description: A Helm chart for deploying OpenShift OAuth Server on Kubernetes
+maintainers:
+- name: suvarineko
+name: openshift-oauth-server
+type: application
+version: 0.1.0

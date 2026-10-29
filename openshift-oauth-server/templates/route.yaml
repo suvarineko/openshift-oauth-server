@@ -1,0 +1,23 @@
+{{- if .Values.routes.enabled }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ include "oauth-server.fullname" . }}
+  labels:
+    {{- include "oauth-server.labels" . | nindent 4 }}
+  {{- with .Values.routes.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  host: {{ .Values.routes.host | quote }}
+  to:
+    kind: Service
+    name: {{ include "oauth-server.fullname" . }}
+    weight: 100
+  port:
+    targetPort: https
+  tls:
+    termination: {{ .Values.routes.tlsTermination }}
+    insecureEdgeTerminationPolicy: Redirect
+{{- end }}

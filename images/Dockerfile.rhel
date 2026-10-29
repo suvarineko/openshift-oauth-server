@@ -1,10 +1,19 @@
-FROM registry.ci.openshift.org/ocp/builder:rhel-8-golang-1.19-openshift-4.13 AS builder
+# Базовые образы можно переопределить через --build-arg (например, на зеркала
+# во внутреннем registry при сборке в GitLab CI).
+# FROM registry.ci.openshift.org/ocp/builder:rhel-8-golang-1.19-openshift-4.13 AS builder
+# FROM golang:1.19 AS builder
+ARG BUILDER_IMAGE=registry.apps.k8s.prod-01.solution.sbt/coreos/tectonic-console-builder:v25
+ARG BASE_IMAGE=registry.apps.k8s.prod-01.solution.sbt/openshift-release-dev/ocp-v4.0-art-dev:4.13.56-x86_64-oauth-proxy
+
+FROM ${BUILDER_IMAGE} AS builder
+
 WORKDIR /go/src/github.com/openshift/oauth-server
 COPY . .
-ENV GO_PACKAGE github.com/openshift/oauth-server
+ENV GO_PACKAGE=github.com/openshift/oauth-server
 RUN make build --warn-undefined-variables
 
-FROM registry.ci.openshift.org/ocp/4.13:base
+# FROM registry.ci.openshift.org/ocp/4.13:base
+FROM ${BASE_IMAGE}
 COPY --from=builder /go/src/github.com/openshift/oauth-server/oauth-server /usr/bin/
 ENTRYPOINT ["/usr/bin/oauth-server"]
 LABEL io.k8s.display-name="OpenShift OAuth Server" \

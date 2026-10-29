@@ -1,0 +1,88 @@
+# Recommended additions/changes to helm/values.yaml
+# These additions improve configurability for the nginx proxy failover system
+
+proxy:
+  enabled: true
+  image:
+    repository: registry.apps.k8s.ose-prod.solution.sbt/openresty/openresty
+    tag: "1.25.3.1-alpine"
+    pullPolicy: IfNotPresent
+  port: 32443
+  domain: "proxy-auth.apps.k8s.r4c-test.solution.sbt"
+  debug: false
+
+  # DNS resolver for dynamic upstream resolution
+  # Default: Kubernetes CoreDNS service IP
+  # Override if using custom DNS or different k8s DNS setup
+  dnsResolver: "169.254.20.10"
+
+  # OAuth proxy endpoints for failover
+  upstreams:
+    primary:
+      oidc: "dowa.apps.k8s.r4c-test.solution.sbt"
+      oauth: "oauth-console.apps.k8s.osad-testing.solution.sbt"
+      api: "oauth-apiserver.apps.k8s.osad-testing.solution.sbt"
+      port: 443
+    secondary:
+      oauth: "oauth-console.apps.k8s.r4c-test.solution.sbt"
+      api: "oauth-apiserver.apps.k8s.r4c-test.solution.sbt"
+      port: 443
+      # Optional: Secondary OIDC for full failover support
+      # oidc: "dowa-backup.apps.k8s.r4c-test.solution.sbt"
+
+  ingress:
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+      nginx.ingress.kubernetes.io/ssl-passthrough: 'true'
+      nginx.ingress.kubernetes.io/ssl-redirect: 'true'
+
+  # Health check configuration
+  healthCheck:
+    # Cache TTL in seconds - how long to cache health check results
+    # Lower = faster failover detection, higher = less overhead
+    # Recommended: 10s for low-traffic, 30s for high-traffic
+    cacheTtl: 10
+
+    # Timeout for each health check request in milliseconds
+    timeout: 3000
+
+    # SSL verification for health checks
+    # Set to true if using proper certificates, false for self-signed
+    sslVerify: false
+
+    # Legacy fields (not used in Lua-based health checking)
+    # Kept for backward compatibility
+    interval: 5
+    rise: 2
+    fall: 3
+
+  # Failover behavior configuration
+  failover:
+    # Return 503 when both upstreams are down instead of attempting secondary
+    returnErrorWhenAllDown: false
+
+    # Enable OIDC failover (requires secondary.oidc to be configured)
+    oidcFailoverEnabled: false
+
+  # Observability configuration
+  observability:
+    # Enable metrics endpoint at /nginx-metrics
+    metricsEnabled: true
+
+    # Enable detailed debug logging in Lua scripts
+    luaDebugEnabled: false
+
+  nodeSelector:
+    node-role.kubernetes.io/master: ""
+
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+  args: []
+  env: []

@@ -1,6 +1,10 @@
 # Default values for oauth-server
 clusterDomain: "k8s.r4c-test.solution.sbt"
 
+# Refuse to install unless the cluster exposes the OpenShift OAuth API group
+# (config.openshift.io/v1/OAuth). Set to false to bypass (e.g. `helm template` in CI).
+apiPreflightCheck: true
+
 replicaCount: 1
 
 image:
@@ -23,11 +27,11 @@ serviceAccount:
 podAnnotations: {}
 
 podSecurityContext:
-  capabilities:
-    drop:
-      - MKNOD
   runAsUser: 0
-  readOnlyRootFilesystem: false
+  # capabilities:
+  #   drop:
+  #     - MKNOD
+  # readOnlyRootFilesystem: false
 
 securityContext: {}
 
@@ -40,7 +44,6 @@ ingress:
   className: nginx
   annotations:
     cert-manager.io/cluster-issuer: cluster-ca
-    kubernetes.io/ingress.class: nginx
     nginx.ingress.kubernetes.io/backend-protocol: HTTPS
     nginx.ingress.kubernetes.io/ssl-passthrough: 'true'
     nginx.ingress.kubernetes.io/ssl-redirect: 'true'
@@ -52,6 +55,7 @@ ingress:
   tls:
     - hosts:
         - oauth-console.apps.k8s.r4c-test.solution.sbt
+        - proxy-auth.apps.k8s.r4c-test.solution.sbt
       secretName: oauth-console-tls
 
 resources:
@@ -86,14 +90,13 @@ tolerations:
     effect: NoSchedule
 
 affinity:
-  affinity:
-    podAntiAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        - labelSelector:
-            matchLabels:
-              app: oauth-openshift
-              oauth-openshift-anti-affinity: 'true'
-          topologyKey: kubernetes.io/hostname
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app: openshift-oauth-server
+            oauth-openshift-anti-affinity: 'true'
+        topologyKey: kubernetes.io/hostname
 
 # Monitoring settings
 monitoring:
@@ -112,3 +115,60 @@ routes:
 tls:
   etcdIssuer: etcd-ca
   clusterIssuer: cluster-ca
+
+redirectURIs: []
+browserClientRedirectURI: proxy-auth
+
+ldap:
+  whitelistGroups: []
+
+# Nginx proxy settings
+proxy:
+  enabled: true
+  image:
+    repository: registry.apps.k8s.ose-prod.solution.sbt/openresty/openresty
+    tag: "1.25.3.1-alpine"
+    pullPolicy: IfNotPresent
+  port: 32443
+  # Domain name for this proxy (used in Host header modifications)
+  domain: "proxy-auth.apps.k8s.r4c-test.solution.sbt"
+  # Enable detailed debug logging (default: false)
+  debug: false
+  # OAuth proxy endpoints for failover
+  upstreams:
+    primary:
+      oidc: "dowa.apps.k8s.r4c-test.solution.sbt"
+      oauth: "oauth-console.apps.k8s.osad-testing.solution.sbt"
+      api: "oauth-apiserver.apps.k8s.osad-testing.solution.sbt"
+      port: 443
+    secondary:
+      oauth: "oauth-console.apps.k8s.r4c-test.solution.sbt"
+      api: "oauth-apiserver.apps.k8s.r4c-test.solution.sbt"
+      port: 443
+  ingress:
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/backend-protocol: HTTPS
+      nginx.ingress.kubernetes.io/ssl-passthrough: 'true'
+      nginx.ingress.kubernetes.io/ssl-redirect: 'true'
+  # Health check configuration
+  healthCheck:
+    interval: 5  # seconds
+    timeout: 3   # seconds
+    rise: 2      # successful checks before marking as up
+    fall: 3      # failed checks before marking as down
+  nodeSelector:
+    node-role.kubernetes.io/master: ""
+  resources:
+    limits:
+      cpu: 200m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 128Mi
+  args: []
+  env: []
+
+populator:
+  remoteToken: ''
+  remoteApi: 'https://api.k8s.prod-01.solution.sbt:6443'

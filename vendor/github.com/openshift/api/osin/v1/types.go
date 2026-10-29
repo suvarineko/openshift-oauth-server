@@ -205,6 +205,11 @@ type LDAPAttributeMapping struct {
 	// email is the list of attributes whose values should be used as the email address. Optional.
 	// If unspecified, no email is set for the identity
 	Email []string `json:"email"`
+	// groups is the list of attributes whose values should be used to synchronize groups
+	// from the LDAP provider to OpenShift for the user. Optional.
+	// LDAP standard group membership attribute is "memberOf"
+	// If unspecified, no groups are synchronized from LDAP
+	Groups []string `json:"groups"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

@@ -1,0 +1,20 @@
+{{- if .Values.proxy.enabled -}}
+{{- $fullName := include "oauth-server.fullname" . -}}
+kind: Service
+apiVersion: v1
+metadata:
+  name: {{ $fullName }}-proxy
+spec:
+  ipFamilies:
+    - IPv4
+  ports:
+    - name: https
+      protocol: TCP
+      port: 8080
+      targetPort: https
+  internalTrafficPolicy: Cluster
+  type: ClusterIP
+  ipFamilyPolicy: SingleStack
+  selector:
+    component: nginx-proxy
+{{- end }}

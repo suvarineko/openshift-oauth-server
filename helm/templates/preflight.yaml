@@ -1,0 +1,5 @@
+{{- /*
+Preflight gate: ensures the chart only installs on clusters exposing the
+config.openshift.io/v1/OAuth API group. Produces no manifests of its own.
+*/ -}}
+{{- include "oauth-server.requireOpenShiftOAuth" . -}}

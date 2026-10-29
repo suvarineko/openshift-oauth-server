@@ -1,0 +1,95 @@
+# ---------------------------------------------------------------------------
+# Apply on the SPOKE cluster. Runs the populator, which reaches out to the
+# CENTRAL cluster to keep the OAuthClient's redirectURIs in sync.
+#
+# Prerequisites on the spoke:
+#   - namespace "redirurl-populator" (created below)
+#   - secret "redirurl-populator-remote" (see secret.example.yaml)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redirurl-populator
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redirurl-populator-config
+  namespace: redirurl-populator
+data:
+  # API server of the CENTRAL cluster.
+  KUBE_API_SERVER: "https://api.central.example.com:6443"
+  # Name of the OAuthClient on the central cluster (cluster-scoped).
+  OAUTHCLIENT_NAME: "spoke-1-oauthclient"
+  # Redirect URLs to ensure are present (comma / whitespace / newline separated).
+  REDIRECT_URIS: >-
+    https://oauth-openshift.apps.spoke-1.example.com/oauth2callback/central,
+    https://console-openshift-console.apps.spoke-1.example.com
+  RECONCILE_INTERVAL: "60s"
+  # Certificate verification is disabled by default; set to "false" and add a CA
+  # (KUBE_CA_CERT/KUBE_CA_CERT_FILE) to enable it.
+  KUBE_INSECURE_SKIP_TLS_VERIFY: "true"
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redirurl-populator
+  namespace: redirurl-populator
+  labels:
+    app.kubernetes.io/name: redirurl-populator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redirurl-populator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redirurl-populator
+    spec:
+      # The populator talks only to the remote cluster; it needs no local API
+      # access, so do not mount the spoke's ServiceAccount token.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: populator
+          # Replace with your registry/image:tag.
+          image: redirurl-populator:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: redirurl-populator-config
+            - secretRef:
+                name: redirurl-populator-remote
+          ports:
+            - name: health
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi

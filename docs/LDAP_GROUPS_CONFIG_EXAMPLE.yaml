@@ -1,0 +1,112 @@
+# Example LDAP Identity Provider Configuration with Group Support
+# This demonstrates how to configure LDAP to fetch user group membership during authentication
+
+apiVersion: osin.config.openshift.io/v1
+kind: OAuthConfig
+identityProviders:
+- name: ldap-provider
+  challenge: true
+  login: true
+  mappingMethod: claim
+  provider:
+    apiVersion: v1
+    kind: LDAPPasswordIdentityProvider
+    attributes:
+      # Required: User ID attribute
+      id:
+      - dn
+
+      # Optional: Preferred username attribute
+      preferredUsername:
+      - uid
+      - cn
+
+      # Optional: Display name attribute
+      name:
+      - cn
+
+      # Optional: Email attribute
+      email:
+      - mail
+
+      # NEW: Optional: Group membership attributes
+      # These will be fetched during authentication and synced to OpenShift Groups
+      groups:
+      - memberOf
+      # Alternative group attributes (first non-empty will be used):
+      # - groupMembership
+      # - isMemberOf
+
+    # LDAP server connection details
+    url: ldap://ldap.example.com:389/cn=users,dc=example,dc=com?uid?sub?(objectClass=inetOrgPerson)
+    insecure: false
+    ca: /path/to/ca-bundle.crt
+
+    # Bind credentials for search
+    bindDN: cn=admin,dc=example,dc=com
+    bindPassword:
+      file: /path/to/bind-password
+
+---
+# How it works:
+
+# 1. User authenticates via LDAP
+# 2. LDAP search fetches user attributes including 'memberOf'
+# 3. ProviderGroups is populated with group DNs from memberOf attribute
+# 4. GroupMapper processes these groups:
+#    a. For each group DN in ProviderGroups
+#    b. Check if OpenShift Group resource exists
+#    c. If exists: Add annotation "oauth.openshift.io/idp.<provider-name>: synced"
+#    d. If not exists: Create new Group with user as member
+#    e. Add/remove user from groups as needed
+# 5. Final user identity includes groups from BOTH:
+#    - Groups synced by CronJob (without annotation)
+#    - Groups from LDAP memberOf (with annotation)
+
+---
+# Example memberOf values in LDAP:
+# memberOf: cn=developers,ou=groups,dc=example,dc=com
+# memberOf: cn=cluster-admins,ou=groups,dc=example,dc=com
+# memberOf: cn=oncall,ou=groups,dc=example,dc=com
+
+# These will create/update OpenShift Groups:
+# - developers (with annotation)
+# - cluster-admins (with annotation if first user, otherwise just marked)
+# - oncall (with annotation)
+
+---
+# Coexistence with CronJob LDAP Sync:
+
+# Scenario 1: CronJob creates group "sre-team"
+# - Group has NO oauth annotation
+# - User authenticates with memberOf: "sre-team"
+# - GroupMapper adds annotation, preserves existing members
+# - Result: Group managed by BOTH CronJob AND OAuth
+
+# Scenario 2: User has memberOf: "developers"
+# - Group doesn't exist
+# - GroupMapper creates it with annotation
+# - Result: Group managed ONLY by OAuth runtime
+
+# Scenario 3: CronJob creates "qa-team", OAuth never sees it
+# - Group has NO annotation
+# - OAuth never modifies it
+# - Result: Group managed ONLY by CronJob
+
+---
+# Benefits:
+
+# 1. No conflicts between CronJob and OAuth runtime
+# 2. Groups are UNION of both sources
+# 3. Per-IDP ownership tracking via annotations
+# 4. Dynamic group membership on login
+# 5. Works with existing CronJob sync without changes
+
+---
+# Important Notes:
+
+# - Groups attribute is OPTIONAL - if not configured, no groups are fetched from LDAP
+# - memberOf is the standard LDAP attribute for group membership
+# - Group DNs are used as-is (can be simplified with LDAP transformations if needed)
+# - Annotation format: "oauth.openshift.io/idp.<provider-name>: synced"
+# - Only groups with this annotation are managed by OAuth for this IDP

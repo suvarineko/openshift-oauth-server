@@ -1,0 +1,4 @@
+/bin/
+/redirurl-populator
+*.test
+*.out

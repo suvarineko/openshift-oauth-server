@@ -1,0 +1,48 @@
+stages:
+  - build
+
+variables:
+  # Версия OpenShift, под которую собирается oauth-server (префикс тега образа).
+  IMAGE_VERSION: "4.13.56"
+  IMAGE_NAME: "oauth-server"
+  # Базовые образы для images/Dockerfile.rhel. Если раннер не видит quay.io или
+  # ose-prod registry, переопределите на зеркала в настройках CI/CD Variables.
+  BUILDER_IMAGE: "quay.io/coreos/tectonic-console-builder:v25"
+  BASE_IMAGE: "registry.apps.k8s.ose-prod.solution.sbt/openshift-release-dev/ocp-v4.0-art-dev:4.13.56-x86_64-oauth-proxy"
+  # Makefile (build-machinery-go) берёт версию из git describe по тегам v*,
+  # поэтому нужна полная история, а не shallow clone.
+  GIT_DEPTH: 0
+
+build-image:
+  stage: build
+  image:
+    name: registry.apps.k8s.prod-01.solution.sbt/kaniko/executor:debug
+    entrypoint: [""]
+  script:
+    - mkdir -p /kaniko/.docker
+    - |
+      cat > /kaniko/.docker/config.json <<EOF
+      {
+        "auths": {
+          "${REGISTRY_URL}": {
+            "username": "${REGISTRY_USER}",
+            "password": "${REGISTRY_PASSWORD}"
+          }
+        }
+      }
+      EOF
+    - IMAGE_TAG="${IMAGE_VERSION}-dev-${CI_COMMIT_SHORT_SHA}"
+    - IMAGE="${REGISTRY_URL}/${REPOSITORY}/${IMAGE_NAME}:${IMAGE_TAG}"
+    - echo "Building $IMAGE"
+    # --ignore-path: раннер монтирует в под /etc/ssl/certs/custom-ca.crt, а
+    # базовый RHEL-образ держит /etc/ssl/certs симлинком. При переходе ко второй
+    # стадии kaniko пытается снести каталог ради симлинка и получает EBUSY на
+    # примонтированном файле. Путь исключается из распаковки и снапшотов.
+    - /kaniko/executor
+        --context "${CI_PROJECT_DIR}"
+        --dockerfile "${CI_PROJECT_DIR}/images/Dockerfile.rhel"
+        --build-arg "BUILDER_IMAGE=${BUILDER_IMAGE}"
+        --build-arg "BASE_IMAGE=${BASE_IMAGE}"
+        --destination "${IMAGE}"
+        --ignore-path=/etc/ssl/certs
+        --skip-tls-verify

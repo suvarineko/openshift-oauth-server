@@ -2,7 +2,6 @@ apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: openshift-oauth-server-tls
-  namespace: {{ .Release.Namespace }}
 spec:
   dnsNames:
     - oauth-console.{{ .Release.Namespace }}.svc

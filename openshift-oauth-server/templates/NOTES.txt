@@ -1,0 +1,41 @@
+Thank you for installing {{ .Chart.Name }}.
+
+Your release is named {{ .Release.Name }}.
+
+To learn more about the release, try:
+
+  $ helm status {{ .Release.Name }}
+  $ helm get all {{ .Release.Name }}
+
+The OAuth Server is responsible for authenticating users and issuing access tokens.
+
+1. Check the server status:
+   kubectl get deployment {{ include "oauth-server.fullname" . }} -n {{ .Release.Namespace }}
+
+2. Access the OAuth server:
+{{- if .Values.ingress.enabled }}
+{{- range $host := .Values.ingress.hosts }}
+  {{- range .paths }}
+  https://{{ $host.host }}{{ .path }}
+  {{- end }}
+{{- end }}
+{{- else if .Values.routes.enabled }}
+  https://{{ .Values.routes.host }}
+{{- else if contains "ClusterIP" .Values.service.type }}
+  kubectl port-forward service/{{ include "oauth-server.fullname" . }} 8443:443 -n {{ .Release.Namespace }}
+  echo "Visit https://localhost:8443 to use the OAuth server"
+{{- end }}
+
+3. Before using the OAuth server in production, make sure to configure:
+   - TLS certificates
+   - Session secrets
+   - Identity providers
+   - OAuth token settings
+
+   You can update these by modifying the values.yaml file or using --set options:
+
+   helm upgrade {{ .Release.Name }} . \
+     --set secrets.tlsCert="$(cat /path/to/tls.crt | base64)" \
+     --set secrets.tlsKey="$(cat /path/to/tls.key | base64)" \
+     --set secrets.sessionSecrets="$(cat /path/to/session-secrets.yaml | base64)" \
+     --set secrets.htpasswdFileData="$(cat /path/to/htpasswd | base64)"

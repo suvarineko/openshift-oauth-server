@@ -44,6 +44,11 @@ func (f *DefaultLDAPUserIdentityFactory) IdentityFor(user *ldap.Entry) (identity
 		id.Extra[authapi.IdentityPreferredUsernameKey] = prefUser
 	}
 
+	// Add groups if configured
+	if groups := f.Definer.Groups(user); len(groups) > 0 {
+		id.ProviderGroups = groups
+	}
+
 	identity = id
 	return
 }
@@ -67,6 +72,7 @@ func (d *LDAPUserAttributeDefiner) AllAttributes() sets.String {
 	attrs.Insert(d.attributeMapping.Name...)
 	attrs.Insert(d.attributeMapping.PreferredUsername...)
 	attrs.Insert(d.attributeMapping.ID...)
+	attrs.Insert(d.attributeMapping.Groups...)
 	return attrs
 }
 
@@ -89,4 +95,25 @@ func (d *LDAPUserAttributeDefiner) PreferredUsername(user *ldap.Entry) string {
 func (d *LDAPUserAttributeDefiner) ID(user *ldap.Entry) string {
 	// support binary ID fields as those the only stable identifiers in some environments
 	return ldaputil.GetRawAttributeValue(user, d.attributeMapping.ID)
+}
+
+// Groups extracts all group values from an LDAP user entry
+// Returns all values from the first group attribute that has values
+func (d *LDAPUserAttributeDefiner) Groups(user *ldap.Entry) []string {
+	for _, groupAttr := range d.attributeMapping.Groups {
+		if groupAttr == "dn" {
+			// Special case: dn is not a real attribute
+			if len(user.DN) > 0 {
+				return []string{user.DN}
+			}
+			continue
+		}
+
+		// Get all values for this attribute
+		values := user.GetAttributeValues(groupAttr)
+		if len(values) > 0 {
+			return values
+		}
+	}
+	return []string{}
 }

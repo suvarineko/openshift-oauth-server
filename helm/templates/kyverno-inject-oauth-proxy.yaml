@@ -1,0 +1,123 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: inject-oauth-proxy
+  labels:
+    {{- include "oauth-server.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-options: Replace=true
+    policies.kyverno.io/title: Add oauth-proxy sidecar for external auth
+    policies.kyverno.io/subject: Pod,Volume
+    policies.kyverno.io/minversion: 1.5.0
+    pod-policies.kyverno.io/autogen-controllers: none
+spec:
+  background: false
+  rules:
+  - name: generate-k8s-api-ca
+    match:
+      any:
+      - resources:
+          kinds:
+          - Pod
+    preconditions:
+      all:
+      - key: '{{`{{request.object.metadata.annotations."oauth-proxy.solution.sbt/inject" || ""}}`}}'
+        operator: Equals
+        value: 'true'
+      - key: "{{`{{request.operation || 'BACKGROUND'}}`}}"
+        operator: AnyIn
+        value:
+          - CREATE
+          - UPDATE
+    generate:
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      name: ca-kubernetes
+      namespace: "{{`{{request.object.metadata.namespace}}`}}"
+      synchronize: true
+      data:
+        spec:
+          commonName: ca-kubernetes-client
+          issuerRef:
+            group: cert-manager.io
+            kind: ClusterIssuer
+            name: cluster-ca-kubernetes
+          secretName: ca-kubernetes
+          usages:
+            - client auth
+            - server auth
+  - name: inject-oauth-proxy
+    match:
+      any:
+      - resources:
+          kinds:
+          - Pod
+    preconditions:
+      all:
+      - key: '{{`{{request.object.metadata.annotations."oauth-proxy.solution.sbt/inject" || ""}}`}}'
+        operator: Equals
+        value: 'true'
+      - key: "{{`{{request.operation || 'BACKGROUND'}}`}}"
+        operator: AnyIn
+        value:
+          - CREATE
+          - UPDATE
+    mutate:
+      patchStrategicMerge:
+        spec:
+          containers:
+          - name: "oauth-proxy"
+            image: "registry.apps.k8s.prod-01.solution.sbt/r4c-development/oauth-proxy:v4.13-17"
+            resources: {}
+            args:
+              - '-provider=openshift'
+              - '-http-address=:4180'
+              - '-https-address=:3001'
+              - '-email-domain=*'
+              - '-upstream=http://127.0.0.1:{{`{{ request.object.metadata.annotations."oauth-proxy.solution.sbt/upstream-port" || "8080" }}`}}'
+              - '-client-id=kubernetes-console'
+              - '-client-secret=hlW2pGGraHDuMAZ4qFEKg2fUHHxr8acDEgDEcIg7RX0U7A9'
+              - '-cookie-secret=VXNSZ1FqMXFId2YwWWt3UlVTUjFXQT09'
+              - '-openshift-ca=/etc/k8s-api/tls/tls.crt'
+              - '-upstream-ca=/etc/tls/tls.crt'
+              - '-ssl-insecure-skip-verify=true'
+              - '-request-logging'
+              - '-cookie-name=openshift-session-token'
+              - '-cookie-domain=apps.{{ .Values.clusterDomain }}'
+              - '-tls-cert=/etc/tls/tls.crt'
+              - '-tls-key=/etc/tls/tls.key'
+              - '-oauth-issuer-hostname=oauth-console.apps.{{ .Values.clusterDomain }}'
+              - '-pass-access-token=true'
+              - '-pass-auth-header=true'
+              - '-pass-raw-access-token=true'
+              - '-pass-user-headers=true'
+              - '-openshift-delegate-urls={"/":{}}'
+              - '-openshift-sar={"verb":"get","resource":"namespaces"}'
+              - '--skip-auth-regex=/healthz'
+            ports:
+              - name: oauth-proxy
+                containerPort: 3001
+                protocol: TCP
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                - ALL
+              readOnlyRootFilesystem: true
+              runAsNonRoot: true
+              runAsUser: 1000
+              runAsGroup: 1000
+            volumeMounts:
+            - name: oauth-proxy-tls-certs
+              mountPath: /etc/tls
+            - name: ca-kubernetes
+              mountPath: /etc/k8s-api/tls
+          volumes:
+          - name: oauth-proxy-tls-certs
+            secret:
+              secretName: '{{`{{ request.object.metadata.annotations."oauth-proxy.solution.sbt/tls-secret-name" || "my-app-tls-secret-name" }}`}}'
+              defaultMode: 420
+          - name: ca-kubernetes
+            secret:
+              secretName: ca-kubernetes
+              defaultMode: 420

@@ -1,0 +1,54 @@
+# ---------------------------------------------------------------------------
+# Apply this on the CENTRAL cluster (the one that hosts the OAuth IdP and the
+# OAuthClient resource). It creates a ServiceAccount whose bearer token the
+# populator running on each spoke cluster uses to read and update the
+# OAuthClient. OAuthClient is cluster-scoped, so a ClusterRole is required.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redirurl-populator
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: redirurl-populator
+  namespace: redirurl-populator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: redirurl-populator
+rules:
+  - apiGroups: ["oauth.openshift.io"]
+    resources: ["oauthclients"]
+    verbs: ["get", "update", "patch"]
+    # Least privilege: uncomment and list the specific OAuthClient name(s) this
+    # ServiceAccount may touch. (Works because the populator only does get/update
+    # by name — it never lists.)
+    # resourceNames: ["spoke-1-oauthclient"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: redirurl-populator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: redirurl-populator
+subjects:
+  - kind: ServiceAccount
+    name: redirurl-populator
+    namespace: redirurl-populator
+---
+# Kubernetes 1.24+ / OpenShift 4.11+ no longer auto-create ServiceAccount token
+# Secrets. This creates a long-lived token. For short-lived tokens instead run:
+#   oc create token redirurl-populator -n redirurl-populator --duration=8760h
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redirurl-populator-token
+  namespace: redirurl-populator
+  annotations:
+    kubernetes.io/service-account.name: redirurl-populator
+type: kubernetes.io/service-account-token
